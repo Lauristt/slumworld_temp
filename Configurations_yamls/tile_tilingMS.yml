@@ -1,0 +1,11 @@
+input_dir: '/home/yuting/data/raw/MS/degradation_test/2001/CellSize10.0/upload/image_dir' ##-20,-25 not updated yet
+output_dir: '/home/yuting/data/tiled/MS/degradation_test/2001/CellSize10.0'
+
+# 
+
+split:
+  - 0.8
+  - 0.2
+  - 0.0
+
+tile_size: 512

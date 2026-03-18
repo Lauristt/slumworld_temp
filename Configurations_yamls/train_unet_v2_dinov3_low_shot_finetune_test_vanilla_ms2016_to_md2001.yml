@@ -1,0 +1,158 @@
+model_parameters:     # this section applies only to a vanilla UNET model (trained from scratch)
+    in_channels: 3    # following an update to the tiling code this parameter should be kept to 3 for both PANS and PAN inputs 
+    out_channels: 1
+    features:
+      - 64
+      - 128
+      - 256
+      - 512
+    dropout_prob: 0.05
+    dropout_2d_prob: 0.05
+
+training_parameters:
+    image_type: 'pan' # set mul for Bobo
+    domain_loss_scaling_factor: 1
+    # use this parameter if one needs to  to add/remove emphasis to the domain adaptation loss (if larger than 1.0), [default: 1.0]
+    # only used if a 'domain_adaptation_csv' is provided in the 'paths' section
+    progress_bar_refresh_rate: 5 # how many batches to update/save stats in the slurm logs or command line
+    in_ram_dataset: true
+    # if set to true all images from the training and validation sets will be loaded in RAM
+    # this leads to faster loading times (especially when dealing with large batch sizes)
+    # but it can also lead to out of memory errors
+    tile_size: 512
+    num_epochs: 5 #184
+    batch_size: 12       # batch_size 12 should be possible in savio
+    target_finetuning:
+        enabled: true
+        csv_file: '/home/yuting/data/low_shot_finetune_task/MS2016_MD2001/tiled/set_1/dataset.csv' # the size of the finetuning file must match the other training files exactly
+        # need to code up a make csv support file
+        target_dino_feature_path: '/path/to/your/fine-tune-dino.csv' #requires both target_finetuning:enabled and dinov3_integration:enabled to be true, otherwise will be neglected
+        mix_mode: 'in_batch'
+        samples_per_batch: 6
+        # scheduler will be disabled if target_finetuning-enabled is true
+        # total source = batch size - finetune batch size
+        # domain_mix_mode: 'in_batch' # loader_level
+        #  # ONLY effective when 'domain_adaptation' from run_type is on. Must select from 'loader_level' or 'in_batch'.
+        #  # 'loader_level' refers to standard combined-loader implementation, when using 'in_batch' you can designate the number of tiles from domain
+        #  # for 'in_batch' the last incomplete batch will be dropped.
+        #  target_per_batch: 1 # the number of tiles from domain, only effective when domain_mix_mode is 'in_batch' and domain_adaptation is True
+        #  # -1 refers to all the tilesfrom domain
+    grad_acc_steps: 1    # gradient accumulation: effective batchsize= batch_size * grad_acc_steps - YOU CAN REDUCE THAT TO 2 IN SAVIO
+    # learning_rate: 0.001
+    decoupled_learning_rate: true
+    learning_rate: 3e-4 # Decoder LR. (Transformer based model ONLY, unet_v2, dino series) if decoupled_learning_rate is false then this is the only LR.
+    encoder_learning_rate: 2e-5 # # Encoder LR. (Transformer based model ONLY, unet_v2, dino series)
+
+    final_lr: 0.001       # scheduler in target_finetuning will be disabled
+    momentum: 0.9
+    l2_reg: 0.002
+    label_noise: false
+    threshold: 0.5      # Probability threshold to use for selecting slums.
+    stochastic_weight_averaging: false # use SWA (see relevant paper) for better generalization
+    criterion: 'BinaryCrossEntropyWithLogits' # 'BinaryCrossEntropyWithLogits' # 
+    optimizer: 'AdamW'
+    scheduler: # scheduler in target_finetuning will be disabled
+        name: null #'CosineWarmRestarts'
+        params:
+            T_0: 100
+            T_mult: 2
+        interval: 'epoch'
+    val_metric:
+        metric: 'val_f1'
+        mode: 'max'
+    validate_every: 1
+    random_seed: 123497
+    visualize_predictions_every: 99  # (n_epochs) if 0 do not visualize
+    visualize_n_batches: 1 # number of batches to visualize (to economise on storage), if -1 store all
+    predict_full_map_every: 9999     # if 0 do not predict full map - SOS! MESSES UP TRAINING, DO NOT USE FOR THE TIME BEING 
+
+compute_parameters:
+    precision: 32        # precision during training, can be 64, 32, 16
+    accelerator:         # "dp" -> data parallel, "ddp" -> distributed data parallel, null (single gpu)
+    gpus: [1]              # int -> number of gpus per node to use for training, [int] the specific gpu to use if more than one per node 
+    auto_select_gpus: true # if set to true the scripts will automatically select a free gpu and use it (if more than one is available)
+    n_nodes: 1           # number of compute nodes to run on
+    deterministic: false # make cuda cores deterministic, slows down training (a bit)
+    n_workers: 10         # number of workers to use for preloading data (equal to number of cores in slurm)
+
+run_type:
+    foldID: -1 # -1 for standard (sinlge fold) training or fold_id = 0, 1, ... k  for k-fold cross validation. REMEMBER TO CHANGE THE dataset.csv and dataset.json files below appropriately
+    from_checkpoint: true # true or false : whether to start from a saved checkpoint or not. If starting from a checkpoint then the number of epoch above should equal n_epochs = additional_epochs + checkpoint_epochs
+    pretrained_model: "unet_v2_dinov3"
+  # null-> unet [default - not pretrained], 'deeplabv3', 'unet_vgg11_bn','unet_vgg13_bn','unet_vgg16_bn', 'unet_resnet18', 'unet_resnet34', 'unet_resnet50'
+  # N.B.: 'deeplabv3' CANNOT be used with DOMAIN_ADAPTATION training
+    self_supervised_pretraining:     # 'ssp', 'assp' or null , activate self_supervised_pretraining (ssp) mode
+    training_mode: 'train_all'
+  # 'overfit': train on only 5% of the supplied dataset to verify that you can overfit a given dataset (i.e. the model is working)
+  # 'lr_find': perform a learning rate sweep to establish the optimal learning rate (i.e. point of stepest descent) for given hyper-parameter combination
+  # 'train_all': train all parameters of the neural network 
+  # 'freeze': freeze the encoder weights and train only the decoder or segmentation head (usefull for pretrained models)
+  # 'differential': train with differential learning rate (the encoder learning rate will be dowscalled by parameter 'enc_dec_learning_rate_ratio' from above)
+    domain_adaptation: false
+  # if set to true then the model will be trained on two tasks: the normal slum prediction task on the training dataset and and auxiliary, self-supervised,
+  # image_source prediction task, comparing images from the training set and images from a different inference dataset (the domain adaptation dataset).
+  # this auxiliary task completely ignores any labels existing on the inference dataset and hence does not cary any overfitting risk
+  # if set to 'true' then the corresposding 'domain_adaptation_csv' should be supplied in section 'paths' below., [default: false] -> train only on input data 
+    profile: false
+  # if set to true, after completion of training the script will also output basic profiling info (total time spend by each method call) [default: false]
+
+paths:
+    dinov3_repo_path: "/home/yuting/dinov3" # the github local repo for dinov3
+    torch_cache_dir: null # if null then use default '~/.cache/torch/hub'
+    training_csv: "/home/yuting/data/tiled/MS/tile_size512/2016/dataset.csv"
+    domain_adaptation_csv:    #"/home/qigong/projects/slumworld/data/tiled/Mumbai/2001/PANS/version002/MS/train_dataset.csv"
+    output_dir: "/home/yuting/data/Trainoutput/unet_v2/MS/original"                              # where to save results
+    inference_dir: # "/home/qigong/projects/slumworld/data/tiled/Mumbai/2001/PAN/version003s/MD/dataset.csv"   # the test set (tiled)
+    normalization_file: "/home/yuting/data/tiled/MS/tile_size512/2016/dataset.json" # this is the info.json inside the training dir
+    checkpoint_file: "/mnt/24B4E926B4E8FAE6/yuting/Trainoutput/unet_v2/MS/original/experiments/unet_v2/lightning_logs/version_1/checkpoints/unet_v2-pan-BinaryCrossEntropyWithLogits-AdamW--L2_0.002-Seed_123497-TStamp_1769919032-SingleFold-epoch=183-val_loss=0.2628-val_acc=0.9717-val_f1=0.8461.ckpt"  #"/home/yuting/data/Trainoutput/vgg13bn/MS/Size512/Linear_+25_+15_+5/experiments/unet_vgg13_bn/lightning_logs/version_6/checkpoints/unet_vgg13_bn-pan-BinaryCrossEntropyWithLogits-AdamW-CosineWarmRestarts-L2_0.002-Seed_123497-TStamp_1752458014-SingleFold-epoch=305-val_loss=0.5484-val_acc=0.9795-val_f1=0.8391.ckpt"
+  #"/home/qigong/projects/slumworld/output/experiments/unet_vgg13_bn/lightning_logs/version_36/checkpoints/last.ckpt"
+
+callbacks:
+    early_stopping:
+        _target_: pytorch_lightning.callbacks.EarlyStopping
+        patience: 1000
+    # monitor: ${training_parameters.val_metric}
+    # mode: ${training_parameters.val_metric.metric_mode}
+        verbose: true
+    model_checkpoint:
+        _target_: pytorch_lightning.callbacks.ModelCheckpoint
+        save_top_k: 10
+        save_last: true
+        verbose: true
+        save_weights_only: false
+        period: 1
+    # filepath: ${paths.output_dir}
+    # monitor: ${training_parameters.val_metric}
+    # mode: ${training_paratruemeters.val_metric.metric_mode}
+    stats_saving:
+        _target_: src.trainer.StatsSavingCallback
+        save_every: 1
+        save_hyperparameters: true
+
+loggers:
+    tensorboard:
+        _target_: pytorch_lightning.loggers.TensorBoardLogger
+        save_dir: ${general.logs_dir}
+        name: model_${model.model_id}
+        version: fold_${training.fold}
+    lr_logger:
+        _target_: pytorch_lightning.callbacks.LearningRateLogger
+        logging_interval: epoch
+
+# new params for dinov3-based training/inference
+dinov3_integration:
+  enabled: true # set this to true only when using dinov3 related models
+  model_key: 'dinov3_sat_large' # must be one in the section 'model_zoo'
+  features_path: "/home/yuting/data/Trainoutput/unet_v2_dinov3/MS/dino_features" 
+  # dinov3 features will only be generated if 'enabled' set to 'true' (for both training and evaluation process)
+  # file preprocess_features.py MUST BE FOUND under slumworldML.runners
+  # dinov3 features will be automatically generated (and saved to this path) for both training and inference process.
+
+# use dinov3_vitl16_pretrain_sat493m-eadcf0ff.pth (the one trained with satellite images)
+model_zoo:
+  url: 'https://dinov3.llamameta.net/dinov3_vitl16/dinov3_vitl16_pretrain_sat493m-eadcf0ff.pth?Policy=eyJTdGF0ZW1lbnQiOlt7InVuaXF1ZV9oYXNoIjoiZ3pjdWNqNTBna2I5dHdoejQ0YXRqbWczIiwiUmVzb3VyY2UiOiJodHRwczpcL1wvZGlub3YzLmxsYW1hbWV0YS5uZXRcLyoiLCJDb25kaXRpb24iOnsiRGF0ZUxlc3NUaGFuIjp7IkFXUzpFcG9jaFRpbWUiOjE3NTYxNTk2NTZ9fX1dfQ__&Signature=a-sq1JjffDScyPO52iLzI3qxbADZO507eHDb6TaO0bTKJcfZ3-tPyqPsV0K47PfzBCs8og0uu-0jUSV0eYQxxPqlfIFjDH3GDpX25iuwTT%7ESef0b1fH6CyY-sYabFfJqUa6hxAeTNzZ07blBPxFf2nrPqUKMUiC-972Pg2KtGZ1XsPD-lU89c1JmBBnAsG%7E26M56-OqOhzgUTJbFbuTHT4ayBugL6iyrvGp18u1Gx%7Ent4KYyyotq8zMxBlb99IQMEJBMIwVxsFo74CT8o8hJPqUnBB6sZMt4xcM1VUPtCt5clvRTxy6mGg-JdUiSLis2qTxA4W4LfuKsP9YcYwqgdQ__&Key-Pair-Id=K15QRJLYKIFSLZ&Download-Request-ID=1138153021522372'
+  # if expired, get a link thru 'https://ai.meta.com/resources/models-and-libraries/dinov3-downloads/', should use dinov3_vitl16_pretrain_sat493m-eadcf0ff.pth
+  # We only need to download the model once, and the downloaded repo should be designated in 'dinov3_repo_path' in section 'paths'
+  hub_model_name: 'dinov3_vitl16'
+  feature_dim: 1024 #fixed
+  patch_size: 16 #fixed

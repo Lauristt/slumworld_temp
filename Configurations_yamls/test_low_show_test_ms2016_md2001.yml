@@ -1,0 +1,102 @@
+image_type: "mul"
+  # can be one of "pan", or, "PAN" - determines the number of input channels
+device: 'gpu'
+  # can be 'cpu' if no cpu is available
+autoselect_gpu: true
+  # if true and there is more than one gpu on the node, then it will select the one with more free memory
+  # Yyou should SET THIS TO false in SAVIO
+split_tiles: false
+  # if set to true [default behaviour] evaluation will be run using [tile/2, tile/2], which is the tile size fed during training
+  # if set to false evaluation will run on the full tile (which is double the tile size seen during training)
+  # will be ignored if overlapping_tiles is set to true
+  # when split_tiles = True, the script will also save overlays of the bottom 10% performing tiles
+use_masked: true
+  # if set to true [default behaviour] the model will predict and evaluate also for masked tiles, which is required in order to be able to reconstruct a full map
+  # if set to false then the model will only predict and evaluate only for non-masked tiles
+  # In this case it is not possible to reconstruct the slum map, trerefore, if required, one has to re-run the evaluation with use_mask set to true
+use_only_test_tiles: false
+  # if set to true evaluation will be run only on the test tiles (that assumes that the dataset split contains a test %, otherwise an error message will be returned)
+  # in that mode predictions for the train/validation set tiles will not be present in the predictions (and/or map overlays and shapefiles)
+  # if set to false the model will predict and evaluate for all tiles
+  # default: false
+batch_size: 4 # use 4 if 1024
+  # select a batch_size that fits within the gpu or 25 if using the cpu
+threshold: 0.5
+  # the threshold to use for determnining if a pixel is a slum, higher thresholds increase precision but lower recall
+tta: false
+  # test time augmentations: if set to true results will be produced by majority voting of predictions for several transformed versions of each tile
+  # N.B. for this to work the user has to provide a dataloader with the desired transformations
+num_augmentations: 11
+  # if tta is set to true, this parameters sets the number of augmentations. It must be an ODD NUMBER.
+  # if tta is set to false [default] it is ignored
+ensemble_predictions: true
+  # if set to false [default] the script will use the first model/checkpoint combination provided
+  # if set to true the script will use all model/checkpoints paths provided - user should supply an ODD NUMBER OF MODELS 
+  # if the number of supplied models is even the code will fail to execute (decisions, at pixel level, are taken using a majority criterion)
+model_type:
+  # one of "unet", "unet_vgg11", "unet_vgg11_bn", "deeplabv3", "unet_resnet18", "unet_resnet50","unet_v2","unet_v2_dinov3"
+  - "unet_v2"
+experiment_path:
+  # the path(s) to the experiment folder(s) where the checkpoint(s) folder(is) is(are) located
+  # path where a directory "evaluation", containing the results of the evalution, will be created
+  # if no output location is provided
+  - "/home/yuting/data/Trainoutput/unet_v2/MS/original/experiments/unet_v2/lightning_logs/version_6"
+checkpoint_path:
+  # the name(s) of the directory(ies) holding the checkpoint(s) and the actual checkpoint file(s) (assume to be within the experiment path)
+  - "checkpoints/unet_v2-pan-BinaryCrossEntropyWithLogits-AdamW--L2_0.002-Seed_123497-TStamp_1771827153-SingleFold-epoch=04-val_loss=0.1472-val_acc=0.9672-val_f1=0.8531.ckpt"
+overlapping_tiles: false
+  # whether the dataset has been been tiled with 50% overlapping_tiles or contiguously
+raw_slum_map_path: "/home/yuting/data/raw/MD/2001/image_dir/input_y.png"
+  # the path to the raw slum map ('input_y.png')
+  # only used if overlapping_tiles is true and/or reconstruct and overlay_map are set to true, 
+  # if overlap is false it will be ignored
+raw_satellite_image_path: "/home/yuting/data/raw/MD/2001/image_dir/input_x.png"
+  # the path to the raw satellite image ('input_x.png')
+  # only used if overlap and overlay_map is true, if overlap is false it will be ignored
+raw_mask_image_path: "/home/yuting/data/raw/MD/2001/image_dir/input_z.png"
+  # then the path to the mask image  if existent ('input_z.png')
+  # only used if overlap and overlay_map is true, if overlay_map is false it will be ignored
+dataset_path: "/home/yuting/data/tiled/MD/tile_size512/2001/dataset.csv" #/home/yuting/data/tiled/PCMC/previous/PAN/version002_1024/dataset.csv
+  # if overlap is set to true then dataset_path should point to the folder containing the overlap tiles
+  # if overlap is set to false the dataset_path should point to the dataset.csv file of the contiguous tiles 
+dataset_json: "/home/yuting/data/tiled/MD/tile_size512/2001/dataset.json" #/home/yuting/data/tiled/PCMC/tile_size512/cellsize0.5/Linear_+5/dataset.json
+  # path to the json file associated with the data: 'dataset.json' for contiduous tiling,
+  # 'overlap_tiling_info.json' for tiling with 50% overlap
+  # used for retrieving information about the original image size (used for reconstructing the map)
+normalization_file_path: "/mnt/24B4E926B4E8FAE6/yuting/Trainoutput/unet_v2/MS/original/experiments/unet_v2/lightning_logs/version_6/normalization.json" #"/home/yuting/data/slumworld/slumworldML/configFiles_vanessa/config_copy/imagenet_norm.json",'/home/yuting/data/Trainoutput/vgg13bn/Mumbai/previous_best/vgg13/version_1/normalization.json'
+# normalization_file_path: "/home/yuting/data/Trainoutput/unet_v2/Mumbai/Size512/Linear_+10_original_-10/experiments/unet_v2/lightning_logs/version_4/normalization.json" #"/home/yuting/data/slumworld/slumworldML/configFiles_vanessa/config_copy/imagenet_norm.json",'/home/yuting/data/Trainoutput/vgg13bn/Mumbai/previous_best/vgg13/version_1/normalization.json'
+  # Normalization statistics file (saved during training)
+save_tiles: true
+  # wheather to save the prediction tiles or not [default: true]
+output_dir: null #"/home/yuting/data/Trainoutput/unet_v2/Mumbai/Size512/Linear_+10_original_-10/experiments/unet_v2/lightning_logs/version_4/evaluation" #"/home/yuting/data/Trainoutput/vgg13bn/Mumbai/Size512/Linear_+25_+15_+5/resnets/experiments/unet_resnet50/lightning_logs/version_1/evaluation"
+  # Directory for saving the prediction tiles and evaluation results
+  # if nul results will be placed inside the experiment path in folder "evaluation"
+reconstruct_map: true #true
+  # if true will try to reconstruct map and save it in the evaluation results folder (requires flag 'save_tiles' set to true)
+overlay_map: true #true
+  # if true (and reconstruct_map is also true) the script will try to overlay the predicted map on the true map (if a 'raw_slum_map_path' has been provided above )
+colourize: true #true
+  # if true slum pixels (value 1) will be multiplied by 255 to be visible in image viewers [default:false]
+generate_shapefile: true
+  # if set to true (and the location of the 'auxilliary_files_folder' and of 'raw_satellite_image_path' is provided), 
+  # then a shapefile of the predicted slum map will be produced 
+auxilliary_files_folder: '/home/yuting/data/raw/MD/2001/auxiliary_dir/'
+  # str, path to the folder holding the auxilliary files produced during image generation. 
+  # the folder should contain the following 4 files, having the same basename (prefix) as the input_image:
+  # *.png.aux.xml, *.png.ovr, *.png.xml, *.pgw 
+  # path to the folder where the shapefile will be saved
+shapefile_name: 'predicted_slums_shapefile_MS2016_to_MD2001_finetune_unet_v2' 
+  # filename for the produced shapefile
+crop: true
+  # by default the shapefile will be croped, if this flag is set to false no cropping will be applied [default: true]
+epsg_code: 32643
+                  # mumbai: 32643
+                  # PCMC: 32643
+                  # ouagoudougou: 32630
+                  # bobo: 32630
+                  # kigali: 32736
+dinov3_integration:
+  enabled: true
+  features_path: "/mnt/24B4E926B4E8FAE6/yuting/Trainoutput/unet_v2_dinov3/MD_2001/dino_features" 
+  feature_dim: 1024
+  patch_size: 16

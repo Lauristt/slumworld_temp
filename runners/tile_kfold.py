@@ -1,0 +1,111 @@
+''' Tile an images and produce appropriate k-different train-validation-test k-fold cross-validation datasets
+ and the corresponding balancing dataset csv files.
+It assumes that files are located in the base_dir = '/global/scratch/users/mksifaki/data/'.
+It requires the name of an input directory with raw files and the name of the folder to store the results 
+(will be created if non existent).
+ARGS:
+    --from_config [-c]:     str, if a path to a configuration yml file is provided all parameters will be loaded from that file.
+                            If not provided parameters should be provided using the command line arguments below [default: None]
+    --input_path [-i]:      str, the input directory name holding the raw files, input_x (and, potentially, input_y, input_z)
+                            (located inside BASEPATH/raw/)
+    --output_path [-0]:     str, the output directory name to put the tiled files (it will be created inside BASEPATH/tiled/)
+    --tile_size [-t]:       int, The required tile size to tile into [default: 512]
+    --n_folds [-n]:         int, number of folds for kfold cross validation [default: 3]
+    --test_fraction [-f]:   float [0,1), fraction of data to keep aside for an independent test set [default: 0.2]
+    --base_path [-b]:       str, the name of the basepath that holds the data [default:'/global/scratch/users/mksifaki/data/']
+    --labels2binary:        boolean, if true [default] then the labels will be binarized, else the signed distances will be retained
+USAGE:
+    >>> INPUT_PATH = '/raw/MUL_MS_Round_105'
+    >>> OUTPUT_PATH = '/tiled/MUL_MS_Round_105_TileSize_512'
+    # to perform 3-fold cross validation with an independent test set of 20% of the data with tilesize 512
+    >>> python3 tile_kfold.py -i INPUT_PATH -o OUTPUT_PATH 
+    # to perform 5-fold cross validation with an independent test set of 30% of the data with tilesize 256
+    >>> python3 tile_kfold.py -i INPUT_PATH -o OUTPUT_PATH -n 5 -f 0.3 -t 256
+'''
+
+import sys
+import os
+sys.path.append("..")
+__package__ = os.path.dirname(sys.path[0])
+from pathlib import Path
+import argparse
+try:
+    from slumworldML.src.cnn_tiler import CNNTiler
+    from slumworldML.src.transforms_loader import create_transform, TRAINING_TRANSFORMS_BASIC
+    from slumworldML.src.custom_transformations import BinarizeLabels
+except Exception as Err1:
+    try:
+        from src.cnn_tiler import CNNTiler
+        from src.transforms_loader import create_transform, TRAINING_TRANSFORMS_BASIC
+        from src.custom_transformations import BinarizeLabels
+    except Exception as Err2:
+        from ..src.cnn_tiler import CNNTiler
+        from ..src.transforms_loader import create_transform, TRAINING_TRANSFORMS_BASIC
+        from ..src.custom_transformations import BinarizeLabels
+
+def run(args):
+
+    INPUTPATH = Path(args['input_dir'])
+    assert INPUTPATH.is_dir(), f"Provided input path {INPUTPATH}  is not a directory. Exiting ..."
+    OUTPUT_PATH= Path(args['output_dir'])
+    os.makedirs(OUTPUT_PATH, exist_ok=True)
+    x_input_path = INPUTPATH/"input_x.png"
+    y_input_path = INPUTPATH/"input_y.png"
+    mask = INPUTPATH/"input_z.png"
+    if not mask.exists():
+        mask = None
+    save_name = f"{args['n_folds']}fold_dataset.csv"
+
+    tiler = CNNTiler(tile_size=args['tile_size'], save_path=OUTPUT_PATH)
+    print("Starting tiling operation...")
+
+    tiler.tile_inputs(x_input_path=x_input_path,
+                      y_input_path=y_input_path, 
+                      labels2binary=args['labels2binary'])
+    print("Finished tiling operation.\nProceeding with dataset creation...")
+
+    tiler.create_kfold_dataset(num_of_folds=args['n_folds'],
+                               test_set_frac=args['test_fraction'],
+                               mask=mask,
+                               save_name=save_name)
+    print("Finished dataset creation.\nCalculating balancing statistics...")
+
+    transformation = TRAINING_TRANSFORMS_BASIC
+    if not args['labels2binary']:
+        transformation['joint_transforms'].insert(0, BinarizeLabels())
+    transformation = create_transform(TRAINING_TRANSFORMS_BASIC, mean=[0,0,0], std=[1,1,1]) 
+    tiler.calculate_tile_statistics(transformation=transformation,
+                                    num_of_samples=100,
+                                    dataset_name=save_name,
+                                    save_csv=True)
+    print("Successfully completed all operations.")
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(prog=os.path.basename(sys.argv[0]), formatter_class=argparse.ArgumentDefaultsHelpFormatter, description=__doc__)
+
+    parser.add_argument('-c', '--from_config', default=None, type=str, help="Load all parameters from a config file.") 
+    parser.add_argument('-i', '--input_dir', type=str, help="Input path.") 
+    parser.add_argument('-o', '--output_dir', type=str, help="The output directory name to put the tiled files (it will be created inside BASEPATH/tiled/).", required=False)
+    parser.add_argument('-n', '--n_folds', type=int, default=3, help="Number of folds for kfold cross validation.") 
+    parser.add_argument('-f', '--test_fraction', type=float, default=0.2, help="Fraction of data to keep aside for an independent test set.")
+    parser.add_argument('-t', '--tile_size', type=int, default=512, help="The required tile size to tile into.")
+    parser.add_argument('-b', '--base_path', type=str, required=False, default='/global/scratch/users/mksifaki/data/', help="Basepath that holds the data (raw and tiled).")
+    parser.add_argument('--labels2binary', type=bool, default=True, help="Whether the labels should be binarized (default) or signed distances should be kept.")
+    args = vars(parser.parse_args())
+
+    if args['from_config']:
+        import yaml
+        try:
+            with open(args['from_config'], 'r') as fin:
+                config = yaml.safe_load(fin)
+            print(f"Loaded parameters from cofiguration file {args['from_config']}")
+            for key, value in config.items():
+                args[key] = value
+        except Exception as Error:
+            print(f"Error trying to load configuration file {args['from_config']}.", Error)
+    for argument in ['input_dir', 'output_dir']:
+        if (args[argument] is None) and (args['from_config'] is None):
+            print(f"Error! {argument} not provided or is None. Aborting ...")
+            sys.exit(1)
+
+    run(args)
