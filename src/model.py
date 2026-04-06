@@ -1293,6 +1293,7 @@ class SwinFormer(nn.Module):
         batch_size, seq_len, _ = x.shape
         h = w = int(sqrt(seq_len))
         x = x.view(batch_size, 24, h*8, w*8)
+
         if self.domain_classifier:
             classifier_logits = self.binary_classifier(reverse_gradients(x))
             return self.decoder(x), classifier_logits
@@ -1316,7 +1317,7 @@ class SwinFormer(nn.Module):
             self.final_conv = nn.Conv2d(32, 1, kernel_size=3, padding=1)
 
         def forward(self, x):
-            h = int(x.shape[2]//8)
+            h = int(x.shape[2]//8)#b,c,h,w
             w = int(x.shape[3]//8)
 
             x = F.relu(self.conv1(x))
@@ -1345,7 +1346,6 @@ class Segformer(nn.Module):
     domain_classifier: bool, if True, a domain classifier is added to the model
     train_head_only: bool, if True, only the head of the model is trained
     '''
-
     def __init__(self, in_channels=3, out_channels=1, preprocess=True, domain_classifier=False, train_head_only=False):
         super(Segformer, self).__init__()
         config = SegformerConfig.from_pretrained("nvidia/segformer-b0-finetuned-ade-512-512")
@@ -1377,9 +1377,7 @@ class Segformer(nn.Module):
 
     def forward(self, x):
         dim = x.shape[3]
-        
         if self.preprocess:
-        
             # Normalize the input image
             if x.min() < 0 or x.max() > 1:
                 x = (x - x.min()) / (x.max() - x.min())
