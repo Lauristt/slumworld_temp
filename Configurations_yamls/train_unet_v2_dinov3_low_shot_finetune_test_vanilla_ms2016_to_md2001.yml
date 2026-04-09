@@ -68,7 +68,8 @@ training_parameters:
 
 compute_parameters:
     precision: 32        # precision during training, can be 64, 32, 16
-    accelerator:         # "dp" -> data parallel, "ddp" -> distributed data parallel, null (single gpu)
+    accelerator:         # PL 1.9+: hardware type (cpu, cuda). Use strategy for parallelism.
+    strategy: null       # null -> single gpu, 'ddp' -> distributed data parallel, 'dp' -> data parallel
     gpus: [1]              # int -> number of gpus per node to use for training, [int] the specific gpu to use if more than one per node 
     auto_select_gpus: true # if set to true the scripts will automatically select a free gpu and use it (if more than one is available)
     n_nodes: 1           # number of compute nodes to run on

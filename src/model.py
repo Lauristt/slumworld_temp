@@ -1293,7 +1293,6 @@ class SwinFormer(nn.Module):
         batch_size, seq_len, _ = x.shape
         h = w = int(sqrt(seq_len))
         x = x.view(batch_size, 24, h*8, w*8)
-
         if self.domain_classifier:
             classifier_logits = self.binary_classifier(reverse_gradients(x))
             return self.decoder(x), classifier_logits
@@ -1317,7 +1316,7 @@ class SwinFormer(nn.Module):
             self.final_conv = nn.Conv2d(32, 1, kernel_size=3, padding=1)
 
         def forward(self, x):
-            h = int(x.shape[2]//8)#b,c,h,w
+            h = int(x.shape[2]//8)
             w = int(x.shape[3]//8)
 
             x = F.relu(self.conv1(x))
@@ -1346,6 +1345,7 @@ class Segformer(nn.Module):
     domain_classifier: bool, if True, a domain classifier is added to the model
     train_head_only: bool, if True, only the head of the model is trained
     '''
+
     def __init__(self, in_channels=3, out_channels=1, preprocess=True, domain_classifier=False, train_head_only=False):
         super(Segformer, self).__init__()
         config = SegformerConfig.from_pretrained("nvidia/segformer-b0-finetuned-ade-512-512")
@@ -1377,7 +1377,9 @@ class Segformer(nn.Module):
 
     def forward(self, x):
         dim = x.shape[3]
+        
         if self.preprocess:
+        
             # Normalize the input image
             if x.min() < 0 or x.max() > 1:
                 x = (x - x.min()) / (x.max() - x.min())
@@ -1389,9 +1391,10 @@ class Segformer(nn.Module):
             #        we will have to resize the image to 256x256 and smaller. Nvidia does not provide a model trained with this size unfortunately, since 512x512 is the smallest size they provide,
             #        but it should work fine with lower resolutions as well.
 
+            _input_device = x.device  # capture device before processor moves tensor to CPU
             x = self.processor(images=x, return_tensors='pt', do_resize=False, do_rescale=False).pixel_values
             if torch.cuda.is_available():
-                    x = x.to('cuda') # In case we are using a GPU
+                    x = x.to(_input_device)  # move back to input device (avoids StopIteration from empty params in DP replica)
 
         outputs = self.model(x)
         logits = outputs.logits

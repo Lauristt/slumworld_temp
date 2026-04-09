@@ -444,7 +444,7 @@ class ModelTrainingWrapper(LightningModule):
         # Now, check if adapt_images is not None before using it.
         if self.classifier and adapt_images is not None:
             batch_size_2 = len(adapt_names)
-            domain_labels = torch.cat([torch.zeros([batch_size_1, 1]), torch.ones([batch_size_2, 1])])
+            domain_labels = torch.cat([torch.zeros([batch_size_1, 1], device=adapt_images.device), torch.ones([batch_size_2, 1],device=adapt_images.device)])
             domain_labels = domain_labels.to(dtype=adapt_images.dtype).to(self.device)
             
             images_ = torch.cat((images, adapt_images), axis=0)
@@ -492,21 +492,37 @@ class ModelTrainingWrapper(LightningModule):
 
             loss_dict = {'loss':torch.stack([l['loss'] for l in losses]).mean(), 'progress_bar':train_stats['accuracy']['train'], 'log':train_stats}
         else:
+            # In DP mode, DataParallel gathers per-GPU losses into shape [n_gpus].
+            # backward() requires a scalar, so reduce with mean().
             loss_dict = losses
+            if isinstance(loss_dict.get('loss'), torch.Tensor) and loss_dict['loss'].numel() > 1:
+                loss_dict = dict(loss_dict)
+                loss_dict['loss'] = loss_dict['loss'].float().mean()
         return loss_dict
 
     def training_epoch_end(self, loss_steps):
         '''agregate across batches'''
-        if isinstance(loss_steps, list): 
-            train_stats = { 'loss':{'train':np.mean([tl['log']['loss']['train'] for tl in loss_steps])}, 
-                            'accuracy':{'train':np.mean([tl['log']['accuracy']['train'] for tl in loss_steps])}
+        if isinstance(loss_steps, list):
+            # implementation for data parallel mode
+            def _to_float(v):
+                # handles Python float (single GPU), CPU/CUDA scalar tensor, or DP-gathered [n_gpus] tensor
+                if isinstance(v, torch.Tensor):
+                    return v.detach().cpu().float().mean().item()
+                return float(v)
+
+            train_stats = { 'loss':{'train':np.mean([_to_float(tl['log']['loss']['train']) for tl in loss_steps])},
+                            'accuracy':{'train':np.mean([_to_float(tl['log']['accuracy']['train']) for tl in loss_steps])}
                             }
             if self.classifier:
-                domain_stats = { 'domain_loss':{'train':np.mean([tl['log']['domain_loss']['train'] for tl in loss_steps])},
-                                 'domain_accuracy':{'train':np.mean([tl['log']['domain_accuracy']['train'] for tl in loss_steps])}
+                domain_stats = { 'domain_loss':{'train':np.mean([_to_float(tl['log']['domain_loss']['train']) for tl in loss_steps])},
+                                 'domain_accuracy':{'train':np.mean([_to_float(tl['log']['domain_accuracy']['train']) for tl in loss_steps])}
                                 }
                 train_stats.update(domain_stats)
-            loss_dict = {'loss':torch.tensor([l['loss'] for l in loss_steps]).mean(), 'progress_bar':train_stats['accuracy']['train'], 'log':train_stats}
+            def _to_loss_tensor(v):
+                if isinstance(v, torch.Tensor):
+                    return v.float().mean()
+                return torch.tensor(float(v))
+            loss_dict = {'loss':torch.stack([_to_loss_tensor(l['loss']) for l in loss_steps]).mean(), 'progress_bar':train_stats['accuracy']['train'], 'log':train_stats}
         else:
             loss_dict = loss_steps
         self.log('train_loss',loss_dict['log']['loss']['train'],prog_bar=True)
@@ -525,6 +541,20 @@ class ModelTrainingWrapper(LightningModule):
             self.custom_logs['train_domain_acc'].append(train_stats['domain_accuracy']['train'])
 
     def validation_step(self, batch, batch_idx):
+        import threading
+        _tid = threading.current_thread().name
+        print(f"DEBUG: validation_step START batch_idx={batch_idx} thread={_tid}")
+        try:
+            return self._validation_step_impl(batch, batch_idx)
+        except Exception as _e:
+            import traceback as _tb
+            print(f"DEBUG: validation_step EXCEPTION thread={_tid}: {type(_e).__name__}: {_e}")
+            _tb.print_exc()
+            raise
+
+    def _validation_step_impl(self, batch, batch_idx):
+        import threading
+        _tid = threading.current_thread().name
         # This handles batches that are wrapped in an extra list by Lightning.
         if isinstance(batch, list) and len(batch) == 1 and isinstance(batch[0], (dict, list, tuple)):
             batch = batch[0]
@@ -538,9 +568,9 @@ class ModelTrainingWrapper(LightningModule):
                 images, dino_features, labels, paths = batch['slum_prediction']
             if 'target_finetuning' in batch:
                 ft_images, ft_dino, ft_labels, ft_paths = batch['target_finetuning']
-                ft_images = ft_images.to(self.device)
-                ft_dino = ft_dino.to(self.device)
-                ft_labels = ft_labels.to(self.device)
+                ft_images = ft_images.to(ft_images.device)
+                ft_dino = ft_dino.to(ft_images.device)
+                ft_labels = ft_labels.to(ft_images.device)
                 # concat
                 if images is None:
                     images, dino_features, labels, paths = ft_images, ft_dino, ft_labels, ft_paths
@@ -560,20 +590,26 @@ class ModelTrainingWrapper(LightningModule):
         if images is None:
             raise ValueError("Validation Step: No labeled data found in batch!")
 
-        images = images.to(self.device)
-        dino_features = dino_features.to(self.device)
-        labels = labels.to(self.device, dtype=images.dtype)
+        # In DP mode, DataParallel scatters inputs to each replica's device before calling
+        # validation_step, so images.device is the correct device for this replica.
+        # next(self.model.parameters()).device would raise StopIteration on GPU 1+ replicas
+        # because self.model has no parameters in the shallow-copied DP replica.
+        _device = images.device
+        print(f"DEBUG: validation_step device={_device}, thread={_tid}, batch_idx={batch_idx}")
+        images = images.to(_device)
+        dino_features = dino_features.to(_device)
+        labels = labels.to(_device, dtype=images.dtype)
         # get concatenated batch size
         batch_size_1 = images.shape[0]
 
         #deal with adaptation and send to the model
         if self.classifier and adapt_images is not None:
             batch_size_2 = len(adapt_names)
-            adapt_images = adapt_images.to(self.device)
-            adapt_dino_features = adapt_dino_features.to(self.device)
+            adapt_images = adapt_images.to(_device)
+            adapt_dino_features = adapt_dino_features.to(_device)
             domain_labels = torch.cat([
-                torch.zeros([batch_size_1, 1], device=self.device),
-                torch.ones([batch_size_2, 1], device=self.device)
+                torch.zeros([batch_size_1, 1], device=_device),
+                torch.ones([batch_size_2, 1], device=_device)
             ])
             domain_labels = domain_labels.to(dtype=images.dtype)
 
@@ -584,7 +620,9 @@ class ModelTrainingWrapper(LightningModule):
             domain_labels = domain_labels.view(logits.shape)
         else:
             # feed into the model
+            print(f"DEBUG: validation_step BEFORE forward, thread={_tid}, device={_device}, images.shape={images.shape}")
             outputs_ = self(images, dino_features)
+            print(f"DEBUG: validation_step AFTER forward, thread={_tid}")
 
         outputs = outputs_[:batch_size_1]
         labels = labels.view(outputs.shape)
@@ -625,18 +663,29 @@ class ModelTrainingWrapper(LightningModule):
             }
             val_stats.update(domain_stats)
 
+        print(f"DEBUG: validation_step END batch_idx={batch_idx}, thread={_tid}, loss={loss.item():.4f}")
         return {'loss': loss, 'log': val_stats, 'progress_bar': val_stats, 'conf_mat_tensor': pbar['confusion-matrix']}
 
     def validation_step_end(self, val_step_outputs):
+        import traceback as _tb
+        print(f"DEBUG: validation_step_end CALLED. isinstance(list)={isinstance(val_step_outputs, list)}, type={type(val_step_outputs).__name__}")
+        try:
+            return self._validation_step_end_impl(val_step_outputs)
+        except Exception as _e:
+            print(f"DEBUG: validation_step_end EXCEPTION {type(_e).__name__}: {_e}")
+            _tb.print_exc()
+            raise
+
+    def _validation_step_end_impl(self, val_step_outputs):
         '''agreggate across gpus (data parallel mode)'''
-        if isinstance(val_step_outputs, list): 
+        if isinstance(val_step_outputs, list):
             val_loss = torch.tensor([x['log']['loss']['val'].detach() for x in val_step_outputs]).mean()
             val_acc = torch.tensor([x['log']['accuracy']['val'].detach() for x in val_step_outputs]).mean()
             val_iou = torch.tensor([x['log']['iou']['val'].detach() for x in val_step_outputs]).mean()
             val_f1_score = torch.tensor([x['log']['f1-score']['val'].detach() for x in val_step_outputs]).mean()
             val_conf_mat = torch.stack([x['log']['confusion-matrix']['val'].detach() for x in val_step_outputs]).sum(0)
             val_stats =  { 'loss':{'val':val_loss}, 'accuracy':{'val':val_acc},
-                            'iou':{'val':val_iou}, 'f1':{'val':val_f1_score},
+                            'iou':{'val':val_iou}, 'f1-score':{'val':val_f1_score},
                             'confusion-matrix':{'val':val_conf_mat},
                         }
             self.log("hp/loss", val_loss)
@@ -653,21 +702,35 @@ class ModelTrainingWrapper(LightningModule):
             total_loss = torch.tensor([x['loss'].detach() for x in val_step_outputs]).mean()
             return {'loss':total_loss, 'log':val_stats, 'progress_bar':val_stats['iou']['val']}
         else:
-            self.log("hp/loss", val_step_outputs['log']['loss']['val'].detach())
-            self.log("hp/acc", val_step_outputs['log']['accuracy']['val'].detach())
-            self.log("hp/f1", val_step_outputs['log']['f1-score']['val'].detach())
-            self.log("hp/iou", val_step_outputs['log']['iou']['val'].detach())
+            # In DP mode, DataParallel.gather unsqueezes 0-dim tensors to shape [n_gpus].
+            # Use .float().mean() to collapse back to a scalar before self.log() (which requires numel==1).
+            self.log("hp/loss", val_step_outputs['log']['loss']['val'].detach().float().mean())
+            self.log("hp/acc", val_step_outputs['log']['accuracy']['val'].detach().float().mean())
+            self.log("hp/f1", val_step_outputs['log']['f1-score']['val'].detach().float().mean())
+            self.log("hp/iou", val_step_outputs['log']['iou']['val'].detach().float().mean())
             if self.classifier:
-                self.log("hp/domain_loss", val_step_outputs['log']['domain_loss']['val'].detach())
-                self.log("hp/domain_acc", val_step_outputs['log']['domain_accuracy']['val'].detach())
+                self.log("hp/domain_loss", val_step_outputs['log']['domain_loss']['val'].detach().float().mean())
+                self.log("hp/domain_acc", val_step_outputs['log']['domain_accuracy']['val'].detach().float().mean())
             return val_step_outputs
 
     def validation_epoch_end(self, val_step_outputs):
         print(f"DEBUG: Epoch {self.current_epoch} - validation_epoch_end: called. len(val_step_outputs) = {len(val_step_outputs)}")
+        if val_step_outputs:
+            print(f"DEBUG: val_step_outputs[0] type={type(val_step_outputs[0]).__name__}, keys={list(val_step_outputs[0].keys()) if isinstance(val_step_outputs[0], dict) else 'N/A'}")
+        if not val_step_outputs:
+            # Log sentinel values so early stopping / callbacks don't crash on missing metric
+            self.log('val_loss', float('nan'), prog_bar=True)
+            self.log('val_acc', float('nan'), prog_bar=True)
+            self.log('val_iou', float('nan'), prog_bar=True)
+            self.log('val_f1', float('nan'), prog_bar=True)
+            return
         '''agreggate across batches'''
-        mean_val_loss = torch.tensor([x['log']['loss']['val'] for x in val_step_outputs]).cpu().mean().item()
-        mean_val_acc = torch.tensor([x['log']['accuracy']['val'] for x in val_step_outputs]).cpu().mean().item()
-        total_conf_mat = torch.stack([x['log']['confusion-matrix']['val'] for x in val_step_outputs]).sum(0)
+        # .float().mean() handles both scalar (single GPU) and shape [n_gpus] (DP gathered) tensors
+        mean_val_loss = torch.stack([x['log']['loss']['val'].float().mean() for x in val_step_outputs]).cpu().mean().item()
+        mean_val_acc = torch.stack([x['log']['accuracy']['val'].float().mean() for x in val_step_outputs]).cpu().mean().item()
+        # In DP mode, confusion matrix is gathered along dim=0: [2,2] per GPU → [n_gpus*2, 2] after gather.
+        # .view(-1, 2, 2).sum(0) works for both single GPU ([2,2]→[1,2,2].sum→[2,2]) and DP ([4,2]→[2,2,2].sum→[2,2]).
+        total_conf_mat = torch.stack([x['log']['confusion-matrix']['val'].view(-1, 2, 2).sum(0) for x in val_step_outputs]).sum(0)
         # Calculate metrics from the aggregated matrix
         # Assuming format is [[TP, FN], [FP, TN]] based on your code
         tp = total_conf_mat[0, 0].item()
@@ -679,8 +742,8 @@ class ModelTrainingWrapper(LightningModule):
         denominator = tp + fp + fn
         mean_val_iou = tp / denominator if denominator > 0 else 0.0
         # mean_val_iou = torch.tensor([x['log']['iou']['val'] for x in val_step_outputs]).cpu().mean().item()
-        mean_val_f1_score = torch.tensor([x['log']['f1-score']['val'] for x in val_step_outputs]).cpu().mean().item()
-        mean_val_conf_mat = torch.stack([x['log']['confusion-matrix']['val'] for x in val_step_outputs]).sum(0).clone().cpu().detach().numpy().tolist()
+        mean_val_f1_score = torch.stack([x['log']['f1-score']['val'].float().mean() for x in val_step_outputs]).cpu().mean().item()
+        mean_val_conf_mat = torch.stack([x['log']['confusion-matrix']['val'].view(-1, 2, 2).sum(0) for x in val_step_outputs]).sum(0).clone().cpu().detach().numpy().tolist()
         self.custom_logs['val_loss'].append(mean_val_loss)
         self.custom_logs['val_acc'].append(mean_val_acc)
         self.custom_logs['val_iou'].append(mean_val_iou)
@@ -738,8 +801,8 @@ class ModelTrainingWrapper(LightningModule):
                        'confusion-matrix':{'val':mean_val_conf_mat},
                     }
         if self.classifier:
-            mean_val_domain_loss = torch.tensor([x['log']['domain_loss']['val'] for x in val_step_outputs]).cpu().mean().item()
-            mean_val_domain_acc = torch.tensor([x['log']['domain_accuracy']['val'] for x in val_step_outputs]).cpu().mean().item()
+            mean_val_domain_loss = torch.stack([x['log']['domain_loss']['val'].float().mean() for x in val_step_outputs]).cpu().mean().item()
+            mean_val_domain_acc = torch.stack([x['log']['domain_accuracy']['val'].float().mean() for x in val_step_outputs]).cpu().mean().item()
             self.custom_logs['val_domain_loss'].append(mean_val_domain_loss)
             self.custom_logs['val_domain_acc'].append(mean_val_domain_acc)
             self.log('val_domain_loss',mean_val_domain_loss, prog_bar=True)
@@ -749,7 +812,7 @@ class ModelTrainingWrapper(LightningModule):
                             }
             val_stats.update(domain_stats)
 
-        mean_val_total_loss = torch.tensor([x['loss'] for x in val_step_outputs]).cpu().mean().item()
+        mean_val_total_loss = torch.stack([x['loss'].float().mean() for x in val_step_outputs]).cpu().mean().item()
 
         return {'loss':mean_val_total_loss, 'log':val_stats, 'progress_bar':val_stats}
 
@@ -1118,7 +1181,10 @@ class InspectPredictionsCallback(Callback):
                 print(f"WARNING: InspectPredictionsCallback received an unsupported batch format: {type(batch)}. Skipping image saving for this batch.")
                 return
 
-            # Note: The model call for prediction now needs two inputs.
+            # Move inputs to the model's device (batch arrives on CPU in the callback before DP scattering).
+            _dev = model.device
+            imgs = imgs.to(_dev)
+            dino_features = dino_features.to(_dev)
             y_hat_logits, _ = model(imgs, dino_features) if model.classifier else (model(imgs, dino_features), None)
             y_hat = torch.sigmoid(y_hat_logits) > model.hparams.threshold # Use sigmoid for logits
             
