@@ -1,213 +1,298 @@
-# SlumWorld — Informal Settlement Detection in Satellite Imagery
+# Slum Detection via Computer Vision
 
-A deep learning pipeline for binary semantic segmentation of informal settlements (slums) from panchromatic and multispectral satellite imagery. The system supports a wide model zoo from vanilla U-Net to transformer-based architectures, adversarial domain adaptation for cross-city generalization, and few-shot target fine-tuning with a satellite-pretrained vision foundation model (DINOv3).
-
----
-
-## Problem Statement
-
-Mapping informal urban settlements from satellite imagery is a low-resource binary segmentation problem: slum pixels are rare relative to background, labels are expensive to produce, and imagery characteristics vary substantially across cities and acquisition years. This codebase addresses all three challenges through a modular architecture, domain-adaptive training, and self-supervised feature integration.
+A deep learning pipeline for binary semantic segmentation of informal settlements (slums) from panchromatic and multispectral satellite imagery. Supports a wide model zoo from vanilla U-Net to transformer-based architectures, adversarial domain adaptation for cross-city generalization, and few-shot target fine-tuning with a satellite-pretrained vision foundation model (DINOv3).
 
 ---
 
 ## Repository Structure
 
 ```
-slumworldML/
-├── src/                        # Core library
-│   ├── model.py                # Model zoo (20+ architectures)
-│   ├── trainer.py              # PyTorch Lightning training wrapper
-│   ├── SatelliteDataset.py     # Dataset classes and data module
-│   ├── base_tiler.py           # Tile / reconstruct large satellite images
-│   ├── cnn_tiler.py            # Train/val/test splits and k-fold tiling
-│   ├── overlap_tiler.py        # 50% overlap inference tiling
-│   ├── predictor.py            # Inference and evaluation
-│   ├── inspector.py            # Visualization and shapefile generation
-│   ├── custom_transformations.py  # Augmentation primitives
-│   ├── transforms_loader.py    # Augmentation pipeline loader
-│   ├── utilities.py            # Optimizers, CRF, normalization helpers
-│   ├── pvtv2.py                # Pyramid Vision Transformer v2 backbone
-│   └── registry.py             # Decorator-based model registry
-├── runners/                    # Executable scripts
-│   ├── train.py                # Main training script
-│   ├── evaluate.py             # Evaluation on test set
-│   ├── inference.py            # Inference on new imagery
-│   ├── tile_standard.py        # Standard tiling
-│   ├── tile_kfold.py           # K-fold tiling
-│   ├── tile_with_overlap.py    # Overlap tiling for inference
-│   ├── reconstruct_map_from_tiles.py
-│   ├── generate_shapefile.py
-│   ├── crf_postprocess_pipeline.py
-│   ├── change_detection.py
-│   └── ...                     # Additional utilities (28 scripts total)
-└── Configurations_yamls/       # YAML experiment configurations
+.
+├── src/                                # Core library (import as a package)
+│   ├── model.py                        # Model zoo — all architectures registered here
+│   ├── trainer.py                      # PyTorch Lightning training wrapper + callbacks
+│   ├── SatelliteDataset.py             # Dataset classes and LightningDataModule
+│   ├── base_tiler.py                   # Tile / reconstruct large satellite images
+│   ├── cnn_tiler.py                    # Train/val/test splits and k-fold tiling logic
+│   ├── overlap_tiler.py                # 50% overlap inference tiling
+│   ├── predictor.py                    # Inference and evaluation
+│   ├── inspector.py                    # Visualization and shapefile generation
+│   ├── custom_transformations.py       # Augmentation primitives
+│   ├── transforms_loader.py            # Augmentation pipeline loader
+│   ├── utilities.py                    # Optimizers, CRF, normalization helpers
+│   ├── pvtv2.py                        # Pyramid Vision Transformer v2 backbone
+│   └── registry.py                     # Decorator-based model registry
+├── runners/                            # Entry-point scripts — run these directly
+│   ├── train.py                        # Train a model
+│   ├── evaluate.py                     # Evaluate on a labeled test set
+│   ├── inference.py                    # Run inference on new (unlabeled) imagery
+│   ├── tile_standard.py                # Tile an image into fixed-size patches
+│   ├── finetune_dummy_tiler.py         # Integer-based tile split for low-shot fine-tuning
+│   ├── tile_kfold.py                   # K-fold cross-validation tiling
+│   ├── tile_with_overlap.py            # 50% overlap tiling for inference
+│   ├── reconstruct_map_from_tiles.py   # Stitch tile predictions into a full map
+│   ├── generate_shapefile.py           # Vectorize binary prediction map to shapefile
+│   ├── preprocess_features.py          # Pre-compute DINOv3 features offline
+│   ├── check_resolution.py             # Verify tile/image resolution consistency
+│   └── crf_postprocess_pipeline.py     # Dense CRF post-processing
+└── Configurations_yamls/               # YAML experiment configs (one per run)
+    ├── tile_tilingMS.yml               # Example tiling config (multispectral)
+    ├── test_low_show_test_ms2016_md2001.yml
+    └── train_unet_v2_dinov3_low_shot_finetune_test_vanilla_ms2016_to_md2001.yml
 ```
 
 ---
 
-## Modeling Approach
+## How to Run an Experiment
 
-### Model Zoo
+Every runner script takes a single YAML config file via `-c`. All parameters — paths, model selection, hyperparameters, compute — live in that file.
 
-All models are registered via a decorator pattern and selected by name in the YAML configuration. Every architecture produces a binary segmentation map (single-channel logit output) and optionally a domain classifier logit for adversarial training.
+```bash
+python runners/<script>.py -c Configurations_yamls/<config>.yml
+```
+
+Use `-h` to see what a script expects:
+```bash
+python runners/train.py -h
+```
+
+### Typical Workflow
+
+**Step 1 — Tile the satellite image**
+```bash
+python runners/tile_standard.py -c Configurations_yamls/tile_tilingMS.yml
+```
+Produces a `dataset.csv` (tile index + train/val/test split + class balance stats) and a `dataset.json` (normalization statistics). Both are needed for training.
+
+**Step 2 — (Optional) Pre-compute DINOv3 features**
+
+Required only if using `unet_v2_dinov3` or `dinov3_*` models.
+```bash
+python runners/preprocess_features.py -c Configurations_yamls/<your_config>.yml
+```
+Features are saved to `dinov3_integration.features_path` and loaded lazily during training.
+
+**Step 3 — Train**
+```bash
+python runners/train.py -c Configurations_yamls/train_unet_v2_dinov3_low_shot_finetune_test_vanilla_ms2016_to_md2001.yml
+```
+Checkpoints are saved to `paths.output_dir`. Filename encodes key metrics, e.g.:
+```
+unet_v2-pan-BinaryCrossEntropyWithLogits-AdamW--L2_0.002-Seed_123497-SingleFold-epoch=183-val_loss=0.2628-val_acc=0.9717-val_f1=0.8461.ckpt
+```
+
+**Step 4 — Evaluate on the test set**
+```bash
+python runners/evaluate.py -c Configurations_yamls/<your_config>.yml
+```
+
+**Step 5 — Reconstruct and export**
+```bash
+python runners/reconstruct_map_from_tiles.py -c Configurations_yamls/<your_config>.yml
+python runners/generate_shapefile.py -c Configurations_yamls/<your_config>.yml
+```
+
+---
+
+## YAML Configuration Reference
+
+Each YAML has six top-level sections. Below are the fields you will most commonly edit.
+
+### `model_parameters`
+Only used by the vanilla `unet` model (trained from scratch). Ignored for pretrained variants.
+
+```yaml
+model_parameters:
+    in_channels: 3        # 3 for both PAN and MS (tiler normalizes to 3-channel)
+    out_channels: 1       # always 1 (binary segmentation)
+    features: [64, 128, 256, 512]
+    dropout_prob: 0.05
+    dropout_2d_prob: 0.05
+```
+
+### `run_type`
+Controls what the training script does.
+
+```yaml
+run_type:
+    pretrained_model: "unet_v2_dinov3"   # model ID — see Model Zoo table below
+    from_checkpoint: true                 # resume from paths.checkpoint_file
+    foldID: -1                            # -1 = standard, 0..k = k-fold
+    training_mode: 'train_all'            # 'train_all' | 'freeze' | 'overfit' | 'lr_find'
+    domain_adaptation: false              # enable adversarial domain adaptation
+    self_supervised_pretraining: null     # 'ssp' | 'assp' | null
+```
+
+### `training_parameters`
+
+```yaml
+training_parameters:
+    image_type: 'pan'           # 'pan' (panchromatic) or 'mul' (multispectral)
+    tile_size: 512
+    num_epochs: 5
+    batch_size: 12
+    criterion: 'BinaryCrossEntropyWithLogits'   # loss function (see Losses section)
+    optimizer: 'AdamW'
+    threshold: 0.5              # probability cutoff for binary prediction
+
+    # Transformer models (unet_v2, dinov3 series): use decoupled LRs
+    decoupled_learning_rate: true
+    learning_rate: 3e-4         # decoder LR
+    encoder_learning_rate: 2e-5 # encoder LR (prevents catastrophic forgetting)
+
+    # Low-shot fine-tuning: mix source and target tiles in the same batch
+    target_finetuning:
+        enabled: true
+        csv_file: '/path/to/target/dataset.csv'
+        mix_mode: 'in_batch'
+        samples_per_batch: 6    # target tiles per batch; source = batch_size - 6
+
+    val_metric:
+        metric: 'val_f1'
+        mode: 'max'             # save checkpoint when val_f1 improves
+```
+
+### `paths`
+
+```yaml
+paths:
+    training_csv: "/path/to/dataset.csv"          # produced by tile_standard.py
+    normalization_file: "/path/to/dataset.json"   # produced by tile_standard.py
+    output_dir: "/path/to/save/checkpoints"
+    checkpoint_file: "/path/to/resume.ckpt"       # only if from_checkpoint: true
+    dinov3_repo_path: "/path/to/dinov3"           # local DINOv3 repo clone
+    inference_dir: "/path/to/test/dataset.csv"    # optional: test set
+    domain_adaptation_csv: null                   # optional: unlabeled target domain
+```
+
+### `compute_parameters`
+
+```yaml
+compute_parameters:
+    precision: 32             # 16 | 32 | 64
+    gpus: [1]                 # [0] for first GPU, [0,1] for two GPUs
+    strategy: null            # null = single GPU, 'dp' = DataParallel, 'ddp' = DistributedDataParallel
+    auto_select_gpus: true    # auto-pick least-loaded GPU
+    n_nodes: 1
+    n_workers: 10             # dataloader workers (match to CPU core count)
+```
+
+### `dinov3_integration`
+Required when using any `dinov3_*` or `unet_v2_dinov3` model.
+
+```yaml
+dinov3_integration:
+    enabled: true
+    model_key: 'dinov3_sat_large'               # satellite-pretrained ViT-L/16
+    features_path: "/path/to/dino_features"     # where pre-computed features are stored
+```
+
+---
+
+## Model Zoo
+
+Select the model by setting `run_type.pretrained_model` in the YAML.
 
 | Model ID | Architecture | Encoder | Notes |
 |---|---|---|---|
-| `unet` | U-Net | Scratch | Features [64,128,256,512], spatial & channel dropout |
-| `unet_vgg11` / `_bn` | U-Net | VGG-11 (ImageNet) | Batch-norm variant |
-| `unet_vgg13_bn` / `vgg16_bn` / `vgg19_bn` | U-Net | VGG-13/16/19 (ImageNet) | |
-| `unet_resnet18` / `34` / `50` | U-Net | ResNet (ImageNet) | |
-| `unet_v2` | PVT-v2-B2 + CBAM + SDI | PVT-v2-B2 | Attention gating at all scales |
-| `unet_v2_dinov3` | PVT-v2-B2 + DINOv3 fusion | PVT-v2-B2 + ViT-L/16 | DINOv3 features fused at bottleneck |
-| `unet_v2_dinov3_att` | `unet_v2_dinov3` + attention | PVT-v2-B2 + ViT-L/16 | Attention gate on DINO features |
-| `dinov3` / `dinov3_sat_large` | ViT-L/16 + segmentation head | DINOv3 SAT (1024-dim) | Satellite-pretrained foundation model |
-| `dinov3_small` | ViT-S/16 + segmentation head | DINOv3 (384-dim) | |
-| `dinov3_base` | ViT-B/16 + segmentation head | DINOv3 (768-dim) | |
-| `segformer` | SegFormer | HuggingFace Transformers | |
-| `swinformer` | Swin Transformer v2 | HuggingFace Transformers | |
+| `unet` | U-Net | Scratch | Set via `model_parameters`; no pretrained weights |
+| `unet_vgg11` / `unet_vgg11_bn` | U-Net | VGG-11 (ImageNet) | |
+| `unet_vgg13_bn` / `unet_vgg16_bn` / `unet_vgg19_bn` | U-Net | VGG-13/16/19 | |
+| `unet_resnet18` / `unet_resnet34` / `unet_resnet50` | U-Net | ResNet (ImageNet) | |
+| `unet_v2` | PVT-v2-B2 + CBAM + SDI | PVT-v2-B2 | Attention at all scales |
+| `unet_v2_dinov3` | PVT-v2-B2 + DINOv3 fusion | PVT-v2-B2 + ViT-L/16 | Requires `dinov3_integration` |
+| `unet_v2_dinov3_att` | `unet_v2_dinov3` + attention gate | PVT-v2-B2 + ViT-L/16 | |
+| `dinov3` / `dinov3_sat_large` | ViT-L/16 + seg head | DINOv3 SAT (1024-dim) | Satellite-pretrained |
+| `dinov3_small` | ViT-S/16 + seg head | DINOv3 (384-dim) | |
+| `dinov3_base` | ViT-B/16 + seg head | DINOv3 (768-dim) | |
+| `segformer` | SegFormer | HuggingFace | |
+| `swinformer` | Swin Transformer v2 | HuggingFace | |
 
-### UNetV2 Architecture
+---
 
-The primary production model (`unet_v2`) uses a **PVT-v2-B2** hierarchical vision transformer as the encoder, producing four feature maps at scales {1/4, 1/8, 1/16, 1/32}. Each scale is refined with **CBAM** (Convolutional Block Attention Module) consisting of:
+## Training Details
 
-- **Channel Attention**: parallel average- and max-pool paths compressed by ratio=16, fused via sigmoid gating
-- **Spatial Attention**: 7×7 depthwise convolution over concatenated channel-pooled maps, sigmoid output
+### Losses (`training_parameters.criterion`)
 
-The refined multi-scale features are unified via **SDI** (Scale-wise Decorrelated Interaction), which multiplies all scale features projected to a common channel dimension (`channel=32`) at each anchor resolution via learned 3×3 convolutions. A progressive decoder reconstructs the segmentation map through transposed convolutions with residual additions.
+| Value | Description |
+|---|---|
+| `BinaryCrossEntropyWithLogits` | Standard BCE; works well with balanced batches |
+| `DiceLoss` | Optimizes overlap; robust to class imbalance |
+| `BinaryFocalLoss` | Down-weights easy negatives; useful for sparse slum pixels |
+| `BinaryLovaszLoss` | Surrogate for IoU |
+| `BinarySoftF1Loss` | Directly optimizes F1 |
 
-### DINOv3 Feature Fusion (`unet_v2_dinov3`)
+### Optimizers (`training_parameters.optimizer`)
 
-A satellite-image-pretrained DINOv3 **ViT-L/16** model (1024-dim patch embeddings, patch size 16) produces dense feature maps that are pre-computed offline and stored on disk for efficient loading. During training, these features are aligned to the PVT bottleneck spatial resolution via bilinear interpolation and concatenated (channel dimension 512 + 1024 = 1536), then projected back to 512 channels via a 1×1 bottleneck convolution before the CBAM and SDI modules.
+`Adam` | `AdamW` | `SGD` | `AdaBound` | `AdaBoundW` | `Yogi`
 
-This fusion allows the segmentation decoder to leverage large-scale visual semantics from a self-supervised foundation model while keeping the spatial fine-grained reasoning within the PVT encoder.
+### Schedulers (`training_parameters.scheduler.name`)
+
+`CosineAnnealingWarmRestarts` | `ReduceLROnPlateau` | `ExponentialLR` | `OneCycleLR` | `null`
+
+> **Note:** The scheduler is automatically disabled when `target_finetuning.enabled: true`.
 
 ---
 
 ## Domain Adaptation
 
-For cross-city generalization, the model supports **adversarial domain adaptation** via a **Gradient Reversal Layer** (GRL). An auxiliary `FCNHead` classifier is attached to the bottleneck features and trained to distinguish source from target domain images. The GRL negates gradients flowing back to the encoder, encouraging domain-invariant representations. Domain loss weight is controlled by a configurable scaling factor.
+Set `run_type.domain_adaptation: true` and provide a `paths.domain_adaptation_csv` pointing to unlabeled tiles from the target city. A Gradient Reversal Layer (GRL) trains the encoder to produce domain-invariant features. The domain loss weight is controlled by `training_parameters.domain_loss_scaling_factor`.
 
 ---
 
-## Low-Shot Target Fine-Tuning
+## Low-Shot Fine-Tuning
 
-The `target_finetuning` module supports adaptation to a new city with minimal labeled data. Source and target batches are mixed **in-batch** at a configurable ratio (e.g., 6 source + 6 target per batch of 12). The learning rate scheduler is disabled during fine-tuning to avoid decay on the sparse target signal. This mode is configured independently from the adversarial domain adaptation path.
+Fine-tune a pretrained source-city model on a small labeled target-city dataset:
 
----
+1. Set `run_type.from_checkpoint: true` and point `paths.checkpoint_file` to the source model.
+2. Set `training_parameters.target_finetuning.enabled: true`.
+3. Provide `target_finetuning.csv_file` with the target city's `dataset.csv`.
+4. Set `samples_per_batch` to the number of target tiles per batch (remaining slots are source tiles).
 
-## Training
-
-### Losses
-
-The following losses are available and may be combined:
-
-| Loss | Purpose |
-|---|---|
-| `BinaryCrossEntropyWithLogits` | Baseline, works well with class-balanced batches |
-| `DiceLoss` | Directly optimizes overlap; robust to class imbalance |
-| `BinaryFocalLoss` | Down-weights easy negatives; useful for sparse slum pixels |
-| `BinaryLovaszLoss` | Surrogate for IoU; smooth extension of mIoU loss |
-| `BinarySoftF1Loss` | Directly optimizes F1 score |
-
-### Optimizers and Schedulers
-
-**Optimizers**: Adam, AdamW, SGD, AdaBound, AdaBoundW, Yogi
-
-- **AdaBound** (`src/utilities.py`): Clips adaptive learning rates within dynamic bounds that converge to a final learning rate, combining the benefits of Adam and SGD.
-- **Yogi**: Adaptive optimizer for non-convex problems; uses additive rather than multiplicative updates for second-moment estimation, improving convergence on sparse gradients.
-
-**Schedulers**: CosineAnnealingWarmRestarts, ReduceLROnPlateau, ExponentialLR, OneCycleLR
-
-**Decoupled learning rates**: Transformer-based models support separate encoder (e.g., `2e-5`) and decoder (e.g., `3e-4`) learning rates to prevent catastrophic forgetting of pretrained encoder weights.
-
-**Stochastic Weight Averaging (SWA)**: Optional; averages weights along the SGD trajectory to improve generalization.
-
-### Data Augmentation
-
-Joint image–label augmentations (applied consistently to both satellite tile and segmentation mask):
-
-- Random horizontal and vertical flips
-- `RandomRotateZoomCropTensor`: Rotates by a random angle in [0°, 90°], computes the largest valid inner square, and crops a random-sized sub-tile to avoid black padding in the output. Ensures augmented tiles have no boundary artifacts.
-- Random channel shuffle (for multispectral inputs)
-- Label noise injection: soft labels via `clamp(label, noise_level, 1 - noise_level)`, or distance-weighted soft labels via `LabelNoiseFromDistances`
-
-**Self-Supervised Pre-Training (SSP)**: The `SSP_Generator` masks a configurable percentage of input pixels and uses Sobel edge detection on the unmasked image as the supervision signal. An autoencoding variant (`Autoencoding_SSP_Generator`) reconstructs masked pixel brightness from the RGB-to-grayscale transform.
+The LR scheduler is disabled automatically. Use a small `num_epochs` (e.g. 5–10).
 
 ---
 
-## Inference Pipeline
+## Tiling
 
-### Tiling
+`tile_standard.py` splits a full satellite image into 512×512 patches and assigns each tile to train/val/test. Two split modes are available:
 
-Large satellite images (typically thousands of pixels) are decomposed into 512×512 tiles using one of two strategies:
+- **Integer-based** (current default): specify exact tile counts, e.g. `train_tiles: 800`, `val_tiles: 100`.
+- **Percentage-based** (legacy): specify fractions, e.g. `train_split: 0.8`.
 
-- **Contiguous tiling** (`base_tiler.py`): Reflection-padded to allow exact reconstruction. Tile predictions are stitched back without overlap.
-- **50% overlap tiling** (`overlap_tiler.py`): Each tile has 50% overlap with its neighbors plus 1/4-tile padding at the boundary. Overlapping regions are averaged at reconstruction, reducing edge discontinuities.
-
-### Post-Processing
-
-**Dense CRF** (`pydensecrf`) refinement is applied as a post-processing step. CRF unary potentials come from model logits; pairwise potentials are computed from the original satellite image (appearance kernel). Parallel CRF processing is supported across CPU cores.
-
-### Ensemble and TTA
-
-- **Model ensembling**: An odd number of checkpoints are evaluated independently; pixel-level majority voting produces the final prediction.
-- **Test-Time Augmentation (TTA)**: Predictions for multiple augmented versions of each tile are majority-voted. Requires an odd number of augmentations.
+The output `dataset.csv` has one row per tile with columns: `tile_path`, `label_path`, `split`, `slum_ratio`. Pass this CSV to `training_parameters.training_csv` in the training config.
 
 ---
 
 ## Evaluation Metrics
 
-Logged per epoch and used for model selection:
-
 | Metric | Description |
 |---|---|
-| `val_loss` | Validation loss (selected criterion) |
+| `val_loss` | Validation loss (configured criterion) |
 | `val_acc` | Binary pixel accuracy |
 | `val_f1` | Binary F1 score |
 | `val_iou` | Jaccard Index (IoU) |
-
-Checkpoint filenames encode key metrics. Examples visible in configuration files:
-
-- `unet_v2` (5 epochs, fine-tuned, MS→MD cross-city): `val_loss=0.1472`, `val_acc=0.9672`, `val_f1=0.8531`
-- `unet_v2` (183 epochs, full training): `val_loss=0.2628`, `val_acc=0.9717`, `val_f1=0.8461`
 
 ---
 
 ## Output
 
-Predictions are produced as:
-- Binary probability maps (PNG)
-- Colorized overlays on the original satellite image (Red = predicted slum, Blue = ground truth, Magenta = overlap, Green = masked region)
-- **GIS Shapefiles** via `generate_shapefile.py`: binary masks are vectorized using `rasterio` / `geopandas` with coordinate reference system support for multiple cities (EPSG:32643 for Mumbai/PCMC, EPSG:32630 for Ouagadougou/Bobo, EPSG:32736 for Kigali).
+| Output | Format | Script |
+|---|---|---|
+| Binary probability map | PNG | `inference.py` |
+| Colorized overlay | PNG (Red=predicted, Blue=GT, Magenta=overlap) | `runners/overlay.py` |
+| Full reconstructed map | GeoTIFF | `reconstruct_map_from_tiles.py` |
+| GIS shapefile | `.shp` via `rasterio`/`geopandas` | `generate_shapefile.py` |
 
----
-
-## Quickstart
-
-**1. Tile satellite images**
-```bash
-python runners/tile_standard.py -c Configurations_yamls/tile_tilingMS.yml
-```
-
-**2. Train a model**
-```bash
-python runners/train.py -c Configurations_yamls/train_unet_v2_dinov3_low_shot_finetune_test_vanilla_ms2016_to_md2001.yml
-```
-
-**3. Run inference on a new city**
-```bash
-python runners/inference.py -c <your_config>.yml
-```
-
-**4. Reconstruct and export**
-```bash
-python runners/reconstruct_map_from_tiles.py
-python runners/generate_shapefile.py
-```
+CRS presets in `generate_shapefile.py`: EPSG:32643 (Mumbai/PCMC), EPSG:32630 (Ouagadougou/Bobo), EPSG:32736 (Kigali).
 
 ---
 
 ## Dependencies
+
+```bash
+pip install -r requirements.txt
+```
 
 | Package | Version | Role |
 |---|---|---|
@@ -222,25 +307,3 @@ python runners/generate_shapefile.py
 | `torchmetrics` | — | F1, IoU, accuracy metrics |
 | `scikit-image` | 0.21.0 | Sobel edge detection (SSP) |
 | `opencv-python` | 4.11.0 | Image I/O and processing |
-
-Install dependencies:
-```bash
-pip install -r requirements.txt
-```
-
----
-
-## Compute
-
-Training is configured via `compute_parameters` in each YAML file:
-
-```yaml
-compute_parameters:
-    precision: 32           # 16 / 32 / 64
-    gpus: [1]               # specific GPU index or count
-    auto_select_gpus: true  # auto-selects least-loaded GPU
-    n_nodes: 1
-    n_workers: 10           # dataloader worker processes
-```
-
-SLURM distributed training (DDP) is supported natively through PyTorch Lightning's `SLURMEnvironment` plugin.
