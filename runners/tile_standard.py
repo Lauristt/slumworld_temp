@@ -27,6 +27,7 @@ import sys
 import os
 sys.path.append("..")
 __package__ = os.path.dirname(sys.path[0])
+import math
 import yaml
 from pathlib import Path
 import argparse
@@ -104,6 +105,6 @@ if __name__ == '__main__':
         if (args[argument] is None) and (args['from_config'] is None):
             print(f"Error! {argument} not provided or is None. Aborting ...")
             sys.exit(1)
-    assert sum(args['split']) == 1.0, f"Split fractions should sum to 1.0 but supplied values {args['split']} sum to {sum(args['split']) }! Aborting operation..."
+    assert math.isclose(sum(args['split']), 1.0), f"Split fractions should sum to 1.0 but supplied values {args['split']} sum to {sum(args['split']) }! Aborting operation..."
 
     run(args)

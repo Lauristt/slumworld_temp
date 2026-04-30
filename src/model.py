@@ -1242,94 +1242,214 @@ class DeepLabV3(nn.Module):
             output = self.deeplabv3(x)['out']
             return output
             
+# class SwinFormer(nn.Module):
+#     '''
+#     SwinFormer model - this is a segmentation model based on the Swin Transformer architecture. 
+#     It is a transformer-based architecture that uses an encoder-decoder architecture. 
+#     More specifically, we use the Swin Transformer model from the Hugging Face model hub, which is pre-trained on the ImageNet dataset, 
+#     as an encoder, and then we apply a custom CNN decoder.
+
+#     args:
+
+#     in_channels: int, number of input channels
+#     out_channels: int, number of output channels
+#     train_head_only: bool, if True, only the head of the model - the CNN decoder - is trained
+#     domain_classifier: bool, if True, a domain classifier is added to the model
+#     '''
+#     def __init__(self, in_channels=3, out_channels=1, train_head_only=False, domain_classifier=False):
+#         super(SwinFormer, self).__init__()
+        
+#         self.name = 'SwinFormer'
+#         self.in_channels = in_channels
+#         self.out_channels = out_channels
+
+#         if self.in_channels != 3:
+#             self.input_adapter = nn.Sequential(
+#                 nn.Conv2d(in_channels, 3, kernel_size=3, padding=1),
+#                 nn.ReLU(),
+#                 nn.Conv2d(3, 3, kernel_size=3, padding=1),
+#                 nn.ReLU()
+#             )
+#         else:
+#             self.input_adapter = nn.Identity()
+
+#         self.encoder = Swinv2Model.from_pretrained("microsoft/swinv2-large-patch4-window12-192-22k")
+#         self.decoder = self.Decoder()
+
+#         if train_head_only:
+#             for parameter in self.encoder.parameters():
+#                 parameter.requires_grad = False
+        
+#         self.domain_classifier = domain_classifier
+#         if self.domain_classifier:
+#             self.binary_classifier = FCNHead(in_channels=24, out_channels=self.out_channels, dim_reduction=4)
+
+
+#     def forward(self, x):
+#         x = self.input_adapter(x)
+#         x = self.encoder(x).last_hidden_state
+
+#         # Reshape the output of the encoder to fit the decoder
+#         batch_size, seq_len, _ = x.shape
+#         h = w = int(sqrt(seq_len))
+#         x = x.view(batch_size, 24, h*8, w*8)
+#         if self.domain_classifier:
+#             classifier_logits = self.binary_classifier(reverse_gradients(x))
+#             return self.decoder(x), classifier_logits
+        
+#         return self.decoder(x)
+
+#     class Decoder(nn.Module):
+#         '''
+#         Decoder class - this is a custom CNN decoder that is used in the SwinFormer model.
+#         '''
+
+#         def __init__(self):
+#             super(SwinFormer.Decoder, self).__init__()
+
+#             self.conv1 = nn.Conv2d(24, 48, kernel_size=3, padding=1)
+#             self.up1 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+#             self.conv2 = nn.Conv2d(48, 64, kernel_size=3, padding=1)
+#             self.up2 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+#             self.conv3 = nn.Conv2d(64, 32, kernel_size=3, padding=1)
+#             self.up3 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+#             self.final_conv = nn.Conv2d(32, 1, kernel_size=3, padding=1)
+
+#         def forward(self, x):
+#             h = int(x.shape[2]//8)
+#             w = int(x.shape[3]//8)
+
+#             x = F.relu(self.conv1(x))
+#             x = self.up1(x)
+#             x = F.relu(self.conv2(x))
+#             x = self.up2(x)
+#             x = F.relu(self.conv3(x))
+#             x = self.up3(x)
+#             x = self.final_conv(x)
+
+#             x = F.adaptive_avg_pool2d(x, (h*32, w*32))
+#             return x
+        
+
 class SwinFormer(nn.Module):
     '''
-    SwinFormer model - this is a segmentation model based on the Swin Transformer architecture. 
-    It is a transformer-based architecture that uses an encoder-decoder architecture. 
-    More specifically, we use the Swin Transformer model from the Hugging Face model hub, which is pre-trained on the ImageNet dataset, 
-    as an encoder, and then we apply a custom CNN decoder.
-
-    args:
-
-    in_channels: int, number of input channels
-    out_channels: int, number of output channels
-    train_head_only: bool, if True, only the head of the model - the CNN decoder - is trained
-    domain_classifier: bool, if True, a domain classifier is added to the model
+    SwinFormer segmentation model using Swinv2 encoder and a lightweight CNN decoder.
+    Args:
+        in_channels (int): Number of input image channels (default 3).
+        out_channels (int): Number of segmentation classes (default 1 for binary).
+        train_head_only (bool): If True, freeze encoder and train only decoder.
+        domain_classifier (bool): If True, add a domain classification head.
+        pretrained_model_name (str): HuggingFace model name for Swinv2.
     '''
-    def __init__(self, in_channels=3, out_channels=1, train_head_only=False, domain_classifier=False):
+    def __init__(self, in_channels=3, out_channels=1, train_head_only=False,
+                 domain_classifier=False, pretrained_model_name="microsoft/swinv2-large-patch4-window12-192-22k"):
         super(SwinFormer, self).__init__()
-        
         self.name = 'SwinFormer'
-        self.in_channels = in_channels
         self.out_channels = out_channels
+        self.domain_classifier = domain_classifier
 
-        if self.in_channels != 3:
+        # Adapt input channels if not 3
+        if in_channels != 3:
             self.input_adapter = nn.Sequential(
                 nn.Conv2d(in_channels, 3, kernel_size=3, padding=1),
-                nn.ReLU(),
+                nn.ReLU(inplace=True),
                 nn.Conv2d(3, 3, kernel_size=3, padding=1),
-                nn.ReLU()
+                nn.ReLU(inplace=True)
             )
         else:
             self.input_adapter = nn.Identity()
 
-        self.encoder = Swinv2Model.from_pretrained("microsoft/swinv2-large-patch4-window12-192-22k")
-        self.decoder = self.Decoder()
+        # Load Swinv2 encoder
+        self.encoder = Swinv2Model.from_pretrained(pretrained_model_name)
+        self.hidden_dim = self.encoder.config.hidden_size   # e.g., 1536 for large
 
         if train_head_only:
-            for parameter in self.encoder.parameters():
-                parameter.requires_grad = False
-        
-        self.domain_classifier = domain_classifier
+            for param in self.encoder.parameters():
+                param.requires_grad = False
+
+        # Decoder: simple upsampling path
+        # Input feature map channels = hidden_dim
+        self.decoder = nn.Sequential(
+            # Reduce channels for efficiency
+            nn.Conv2d(self.hidden_dim, 512, kernel_size=3, padding=1),
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True),
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
+
+            nn.Conv2d(512, 256, kernel_size=3, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
+
+            nn.Conv2d(256, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
+
+            nn.Conv2d(128, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
+
+            nn.Conv2d(64, out_channels, kernel_size=1)
+        )
+
         if self.domain_classifier:
-            self.binary_classifier = FCNHead(in_channels=24, out_channels=self.out_channels, dim_reduction=4)
+            # use the deepest feature map (after encoder) for domain classification
+            self.binary_classifier = nn.Sequential(
+                nn.AdaptiveAvgPool2d(1),
+                nn.Flatten(),
+                nn.Linear(self.hidden_dim, 512),
+                nn.ReLU(inplace=True),
+                nn.Dropout(0.1),
+                nn.Linear(512, out_channels)
+            )
 
-
-    def forward(self, x):
+    def forward(self, x, return_features=False):
+        """
+        Args:
+            x: input tensor of shape (B, C, H, W)
+            return_features: if True, also return intermediate features (for domain classifier)
+        Returns:
+            segmentation logits of shape (B, out_channels, H, W)
+            (optionally) domain classifier logits if domain_classifier is True and return_features is False
+        """
+        B, _, orig_h, orig_w = x.shape
         x = self.input_adapter(x)
-        x = self.encoder(x).last_hidden_state
 
-        # Reshape the output of the encoder to fit the decoder
-        batch_size, seq_len, _ = x.shape
-        h = w = int(sqrt(seq_len))
-        x = x.view(batch_size, 24, h*8, w*8)
+        outputs = self.encoder(x)
+        last_hidden = outputs.last_hidden_state   # (B, num_patches, hidden_dim)
+
+        num_patches = last_hidden.shape[1]
+        # compute grid size (here we assuming square patches)
+        h = w = int(sqrt(num_patches))
+        # some inputs may not produce exact square; fallback to patch arrangement
+        if h * w != num_patches:
+            patch_size = self.encoder.config.patch_size
+            h = orig_h // patch_size
+            w = orig_w // patch_size
+            if h * w != num_patches:
+                raise ValueError(f"Patch grid mismatch: {num_patches} vs {h*w}")
+        feature_map = last_hidden.permute(0, 2, 1).view(B, self.hidden_dim, h, w)
+
+        # domain classifier branch (if needed and called separately)
+        if self.domain_classifier and return_features:
+            return feature_map
+
+        # decoder produces logits at original resolution
+        seg_logits = self.decoder(feature_map)
+        # ensure exact size (in case of rounding)
+        if seg_logits.shape[-2:] != (orig_h, orig_w):
+            seg_logits = F.interpolate(seg_logits, size=(orig_h, orig_w),
+                                       mode='bilinear', align_corners=False)
+
         if self.domain_classifier:
-            classifier_logits = self.binary_classifier(reverse_gradients(x))
-            return self.decoder(x), classifier_logits
-        
-        return self.decoder(x)
+            # global pooling on encoder features for domain classification
+            domain_logits = self.binary_classifier(feature_map)
+            return seg_logits, domain_logits
+        else:
+            return seg_logits
 
-    class Decoder(nn.Module):
-        '''
-        Decoder class - this is a custom CNN decoder that is used in the SwinFormer model.
-        '''
-
-        def __init__(self):
-            super(SwinFormer.Decoder, self).__init__()
-
-            self.conv1 = nn.Conv2d(24, 48, kernel_size=3, padding=1)
-            self.up1 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
-            self.conv2 = nn.Conv2d(48, 64, kernel_size=3, padding=1)
-            self.up2 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
-            self.conv3 = nn.Conv2d(64, 32, kernel_size=3, padding=1)
-            self.up3 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
-            self.final_conv = nn.Conv2d(32, 1, kernel_size=3, padding=1)
-
-        def forward(self, x):
-            h = int(x.shape[2]//8)
-            w = int(x.shape[3]//8)
-
-            x = F.relu(self.conv1(x))
-            x = self.up1(x)
-            x = F.relu(self.conv2(x))
-            x = self.up2(x)
-            x = F.relu(self.conv3(x))
-            x = self.up3(x)
-            x = self.final_conv(x)
-
-            x = F.adaptive_avg_pool2d(x, (h*32, w*32))
-            return x
-        
 
 class Segformer(nn.Module):
     '''

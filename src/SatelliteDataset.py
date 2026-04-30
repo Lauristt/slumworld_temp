@@ -844,18 +844,22 @@ class TestingDataLoader:
         # >>> testDataLoader = Loader.get_dataloader()
     '''
     # This is a simplified wrapper for creating a testing dataloader from a CSV file.
-    def __init__(self, dataset_file, norm_file=None, batch_size=10, num_workers=1, tile_size=512, 
-                 shuffle=False, foldID=-1, split_tiles=True, TTA=False, image_type='mul', 
-                 mode='eval', use_only_test_tiles=False, 
+    def __init__(self, dataset_file, norm_file=None, batch_size=10, num_workers=1, tile_size=512,
+                 shuffle=False, foldID=-1, split_tiles=True, TTA=False, image_type='mul',
+                 mode='eval', use_only_test_tiles=False, exclude_test_tiles=False,
                  use_dinov3_features=False, dino_features_path=None,
                  dino_feature_dim=1024, dino_patch_size=16):
-        
+
         df = pd.read_csv(dataset_file)
         training_column = f"Fold_{foldID}" if isinstance(foldID, int) and foldID != -1 else "dataset_part"
         if use_only_test_tiles:
             self.df = df[df[training_column] == "Test"]
             if self.df.empty:
                 sys.exit("Error: No 'Test' data found for the specified fold.")
+        elif exclude_test_tiles:
+            self.df = df[df[training_column] != "Test"]
+            if self.df.empty:
+                sys.exit("Error: No non-Test data found after excluding Test tiles.")
         else:
             self.df = df
             

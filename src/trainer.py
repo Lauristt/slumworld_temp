@@ -228,7 +228,7 @@ class ModelTrainingWrapper(LightningModule):
                 print("Parameter {} not understood. Will be ignored.".format(param))
                 continue
             if param not in ['optimizer', 'criterion', 'scheduler']:
-                if isinstance(val, type(TRAINING_PARAMS[param])):
+                if TRAINING_PARAMS[param] is None or isinstance(val, type(TRAINING_PARAMS[param])):
                     setattr(self, param, val)
                     self.hparams[param] = val
                 else:
@@ -738,11 +738,14 @@ class ModelTrainingWrapper(LightningModule):
         fp = total_conf_mat[1, 0].item()
         tn = total_conf_mat[1, 1].item()
 
-        # Calculate IoU safely, handling the case where the denominator is zero
-        denominator = tp + fp + fn
-        mean_val_iou = tp / denominator if denominator > 0 else 0.0
-        # mean_val_iou = torch.tensor([x['log']['iou']['val'] for x in val_step_outputs]).cpu().mean().item()
-        mean_val_f1_score = torch.stack([x['log']['f1-score']['val'].float().mean() for x in val_step_outputs]).cpu().mean().item()
+        # Both IoU and F1 are derived from the same global confusion matrix to ensure
+        # consistent (micro) aggregation. Averaging per-batch scores would deflate F1
+        # on batches with no positive pixels (binary_fbeta_score returns 0) while
+        # leaving the confusion-matrix IoU unaffected, creating a spurious IoU > F1.
+        iou_denom = tp + fp + fn
+        mean_val_iou = tp / iou_denom if iou_denom > 0 else 0.0
+        f1_denom = 2 * tp + fp + fn
+        mean_val_f1_score = (2 * tp / f1_denom) if f1_denom > 0 else 0.0
         mean_val_conf_mat = torch.stack([x['log']['confusion-matrix']['val'].view(-1, 2, 2).sum(0) for x in val_step_outputs]).sum(0).clone().cpu().detach().numpy().tolist()
         self.custom_logs['val_loss'].append(mean_val_loss)
         self.custom_logs['val_acc'].append(mean_val_acc)

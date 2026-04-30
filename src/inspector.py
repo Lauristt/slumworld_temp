@@ -1,6 +1,7 @@
 import sys
 import os
 import shutil
+import warnings
 from pathlib import Path
 import math
 from collections import defaultdict
@@ -342,7 +343,14 @@ def generate_shapefiles(input_image_path, output_folder, auxilliary_files_folder
                 shapes(image, mask=mask, transform=src.transform)))
     geoms = list(results)
     gpd_polygonized_raster = gpd.GeoDataFrame.from_features(geoms)
-    gpd_polygonized_raster = gpd_polygonized_raster.set_crs(epsg=epsg_code)
+    aux_crs = in_meta.get('crs')
+    if aux_crs is not None:
+        gpd_polygonized_raster = gpd_polygonized_raster.set_crs(aux_crs)
+    else:
+        warnings.warn(
+            f"No CRS found in auxiliary files. Falling back to epsg_code={epsg_code} from config. "
+            "Verify the epsg_code is correct for this dataset.", UserWarning)
+        gpd_polygonized_raster = gpd_polygonized_raster.set_crs(epsg=epsg_code)
     gpd_polygonized_raster[:-1].to_file(output_folder+'/'+shapefile_name)
     ### cleanup
     shutil.rmtree(temp_path)

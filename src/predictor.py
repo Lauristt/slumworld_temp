@@ -160,19 +160,110 @@ class Predictor():
     def _batch_predict(self, images, dino_features):
         # Check if the model is a DINOv3 variant by checking its forward signature
         model_forward_params = inspect.signature(self.model.forward).parameters
-        
+
         if 'dino_features' in model_forward_params:
             # This is a dual-input model
             outputs = self.model(images, dino_features)
         else:
             # This is a single-input model, ignore dino_features
             outputs = self.model(images)
-        
+
         if isinstance(outputs, tuple):
             outputs = outputs[0]
-            
+
         outputs_ = (torch.sigmoid(outputs) > self.threshold).long().detach().cpu().numpy()
         return outputs_
+
+    def _batch_predict_proba(self, images, dino_features):
+        """Returns raw sigmoid probabilities as float32 numpy array (no binarization)."""
+        model_forward_params = inspect.signature(self.model.forward).parameters
+        if 'dino_features' in model_forward_params:
+            outputs = self.model(images, dino_features)
+        else:
+            outputs = self.model(images)
+        if isinstance(outputs, tuple):
+            outputs = outputs[0]
+        return torch.sigmoid(outputs).detach().cpu().numpy().astype(np.float32)
+
+    def predict_proba_for_batches(self):
+        """Run full-dataset inference returning per-pixel sigmoid probabilities (not binarized).
+
+        Returns:
+            proba_list:  list of float32 np.arrays, one per batch, shape (B, 1, H, W)
+            labels_list: list of int np.arrays, one per batch (empty list if dataset has no labels)
+            tile_names:  list of name tuples, one per batch
+        """
+        if not self.model_is_loaded:
+            self._load_model()
+        proba_list, labels_list, tile_names = [], [], []
+        with torch.no_grad():
+            for batch_data in self.data_loader:
+                labels = None
+                if len(batch_data) == 4:
+                    images, dino_features, labels, names = batch_data
+                elif len(batch_data) == 3:
+                    images, dino_features, names = batch_data
+                else:
+                    raise ValueError(
+                        f"Unsupported batch format: expected 3 or 4 items, got {len(batch_data)}.")
+                images_dev = images.to(self.device)
+                dino_features_dev = dino_features.to(self.device)
+                proba = self._batch_predict_proba(images_dev, dino_features_dev)
+                proba_list.append(copy.deepcopy(proba))
+                if labels is not None:
+                    labels_list.append(copy.deepcopy(labels.numpy()))
+                tile_names.append(copy.deepcopy(names))
+        return proba_list, labels_list, tile_names
+
+    @staticmethod
+    def find_optimal_threshold(proba_list, labels_list, metric='f1',
+                               threshold_range=(0.05, 0.95), threshold_step=0.05):
+        """Search for the optimal binarization threshold on a labelled finetune dataset.
+
+        Concatenates all pixels from all batches and evaluates every candidate threshold
+        in one pass — this is fast because inference is only run once.
+
+        Args:
+            proba_list:      list of float32 np.arrays (B,1,H,W) from predict_proba_for_batches
+            labels_list:     list of int np.arrays (B,*,H,W) ground-truth labels
+            metric:          optimisation target: 'f1' or 'iou'
+            threshold_range: (min, max) inclusive range of thresholds to search
+            threshold_step:  step between candidate thresholds
+        Returns:
+            best_threshold:  float
+            results_df:      pd.DataFrame with columns [threshold, f1, iou, precision, recall]
+        """
+        all_proba = np.concatenate([b.ravel() for b in proba_list])
+        all_labels = np.concatenate([b.ravel() for b in labels_list]).astype(bool)
+
+        thresholds = np.arange(
+            threshold_range[0],
+            threshold_range[1] + threshold_step * 0.5,
+            threshold_step,
+        )
+        SMOOTH = 1e-6
+        records = []
+        for t in thresholds:
+            pred = all_proba > t
+            tp = np.logical_and(pred, all_labels).sum()
+            fp = np.logical_and(pred, ~all_labels).sum()
+            fn = np.logical_and(~pred, all_labels).sum()
+            precision = tp / (tp + fp + SMOOTH)
+            recall = tp / (tp + fn + SMOOTH)
+            f1 = 2 * precision * recall / (precision + recall + SMOOTH)
+            iou = tp / (tp + fp + fn + SMOOTH)
+            records.append({
+                'threshold': round(float(t), 4),
+                'f1': float(f1),
+                'iou': float(iou),
+                'precision': float(precision),
+                'recall': float(recall),
+            })
+
+        results_df = pd.DataFrame(records)
+        score_col = 'f1' if metric == 'f1' else 'iou'
+        best_threshold = float(results_df.loc[results_df[score_col].idxmax(), 'threshold'])
+        return best_threshold, results_df
 
     def predict_for_batches(self, number_of_batches=-1, visualize=False, return_labels=True, return_names=True):
         if not self.model_is_loaded:

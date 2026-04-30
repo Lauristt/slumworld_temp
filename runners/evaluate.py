@@ -12,12 +12,14 @@ USAGE:
 import sys
 import os
 import shutil
+import warnings
 import pdb
 import datetime
 import subprocess
 from torchvision.transforms.functional import convert_image_dtype
 sys.path.append("..")
 __package__ = os.path.dirname(sys.path[0])
+import numpy as np
 import yaml
 import json
 import argparse
@@ -137,6 +139,7 @@ def main(config, config_file):
     if config['ensemble_predictions']:
         models_list = config['model_type']
         if len(models_list)%2 == 0:
+            
             print("Error! Selected model ensembling while providing an even number of models.")
             print("Ensembling is based on majority voting and hence requires an odd number of models.")
             print("Exiting...")
@@ -164,15 +167,15 @@ def main(config, config_file):
             df.to_csv(tmp_dataset_csv)
             dataset_path = Path(tmp_dataset_csv)
         Loader = TestingDataLoader(
-            str(dataset_path.absolute()), 
-            batch_size=config['batch_size'], 
-            norm_file=str(norm_file.absolute()), 
-            tile_size=tile_size, 
-            split_tiles=config['split_tiles'], 
-            TTA=config['tta'], 
+            str(dataset_path.absolute()),
+            batch_size=config['batch_size'],
+            norm_file=str(norm_file.absolute()),
+            tile_size=tile_size,
+            split_tiles=config['split_tiles'],
+            TTA=config['tta'],
             image_type=config['image_type'],
             use_only_test_tiles=config['use_only_test_tiles'],
-            # Pass the dynamically determined DINOv3 configuration
+            exclude_test_tiles=config.get('exclude_test_tiles', False),
             use_dinov3_features=is_dinov3_run,
             dino_features_path=dinov3_conf.get('features_path'),
             dino_feature_dim=dinov3_conf.get('feature_dim', 1024),
@@ -182,20 +185,97 @@ def main(config, config_file):
 
         predictor.load_data(testDataLoader)
 
+        # ── Threshold fine-tuning (runs before evaluation for both ensemble and single-model) ──
+        ft_conf = config.get('threshold_finetune', {})
+        if ft_conf.get('enabled', False):
+            ft_dataset_csv = ft_conf.get('dataset_csv')
+            if not ft_dataset_csv or not Path(ft_dataset_csv).exists():
+                print(f"Warning: threshold_finetune.dataset_csv not found ({ft_dataset_csv}). Skipping threshold fine-tuning.")
+            else:
+                print("\n" + "="*60)
+                ft_df = pd.read_csv(str(Path(ft_dataset_csv).absolute()))
+                ft_tile_size = io.imread(ft_df.iloc[0, 0]).shape[1]
+                ft_loader = TestingDataLoader(
+                    str(Path(ft_dataset_csv).absolute()),
+                    batch_size=config['batch_size'],
+                    norm_file=str(norm_file.absolute()),
+                    tile_size=ft_tile_size,
+                    split_tiles=config['split_tiles'],
+                    TTA=False,
+                    image_type=config['image_type'],
+                    use_only_test_tiles=ft_conf.get('use_only_finetune_tiles', False),
+                    use_dinov3_features=is_dinov3_run,
+                    dino_features_path=dinov3_conf.get('features_path'),
+                    dino_feature_dim=dinov3_conf.get('feature_dim', 1024),
+                    dino_patch_size=dinov3_conf.get('patch_size', 16),
+                )
+                ft_dataloader = ft_loader.get_dataloader()
+
+                if config['ensemble_predictions']:
+                    # Collect per-model probabilities and average (soft voting)
+                    print("Running threshold fine-tuning on finetune dataset (ensemble: averaging probabilities across models)...")
+                    ft_proba_sum = None
+                    ft_labels_list = None
+                    for model_i_name, checkpoint_i in zip(models_list, checkpoints):
+                        model_ft = MODELS_REGISTRY[model_i_name](in_channels=3, out_channels=1, domain_classifier=False)
+                        predictor.load_model(model_ft, str(checkpoint_i.absolute()),
+                                             device=DEVICE, autoselect_gpu=config['autoselect_gpu'])
+                        predictor.load_data(ft_dataloader)
+                        ft_proba_list_i, ft_labels_list_i, _ = predictor.predict_proba_for_batches()
+                        proba_arr = np.vstack(ft_proba_list_i)
+                        ft_proba_sum = proba_arr if ft_proba_sum is None else ft_proba_sum + proba_arr
+                        if ft_labels_list is None and ft_labels_list_i:
+                            ft_labels_list = ft_labels_list_i
+                        predictor._cleanup()
+                    ft_proba_list = [ft_proba_sum / len(models_list)]
+                else:
+                    # Single model: load once, collect probabilities
+                    print("Running threshold fine-tuning on finetune dataset...")
+                    predictor.load_model(model, str(checkpoint.absolute()),
+                                         device=DEVICE, autoselect_gpu=config['autoselect_gpu'])
+                    predictor.load_data(ft_dataloader)
+                    ft_proba_list, ft_labels_list, _ = predictor.predict_proba_for_batches()
+
+                if not ft_labels_list:
+                    print("Warning: finetune dataset has no labels. Skipping threshold fine-tuning.")
+                else:
+                    best_threshold, threshold_results = predictor.find_optimal_threshold(
+                        ft_proba_list,
+                        ft_labels_list,
+                        metric=ft_conf.get('metric', 'f1'),
+                        threshold_range=tuple(ft_conf.get('threshold_range', [0.05, 0.95])),
+                        threshold_step=ft_conf.get('threshold_step', 0.05),
+                    )
+                    print(f"Optimal threshold ({ft_conf.get('metric', 'f1')}): {best_threshold:.4f}  "
+                          f"(was: {predictor.threshold})")
+                    predictor.threshold = best_threshold
+                    if ft_conf.get('save_search_results', True):
+                        os.makedirs(str(output_dir.absolute()), exist_ok=True)
+                        threshold_results.to_csv(
+                            os.path.join(str(output_dir.absolute()), 'threshold_search.csv'),
+                            index=False,
+                        )
+                        print(f"Threshold search results saved to {output_dir}/threshold_search.csv")
+                # Restore the original test dataloader
+                predictor.load_data(testDataLoader)
+                print("="*60 + "\n")
+        # ─────────────────────────────────────────────────────────────────────
+
         if config['ensemble_predictions']:
             results = predictor.evaluate_model_ensemble(models_list=models_list, model_checkpoints=checkpoints,
-                                                        save_tiles=save_tiles, output_path=str(output_dir.absolute()), 
+                                                        save_tiles=save_tiles, output_path=str(output_dir.absolute()),
                                                         predict_only=False, device=DEVICE,
                                                         TTA=config['tta'], num_augs=config['num_augmentations'],
                                                         dataset_csv=dataset_path.absolute(),
                                                         dinov3_config=dinov3_conf if is_dinov3_run else None
                                                         )
         else:
-            predictor.load_model(model, str(checkpoint.absolute()),
-                                 device=DEVICE, 
-                                 autoselect_gpu=config['autoselect_gpu']
-                                )
-            results = predictor.evaluate_model(save_tiles=save_tiles, output_path=str(output_dir.absolute()), 
+            if not predictor.model_is_loaded:
+                predictor.load_model(model, str(checkpoint.absolute()),
+                                     device=DEVICE,
+                                     autoselect_gpu=config['autoselect_gpu']
+                                    )
+            results = predictor.evaluate_model(save_tiles=save_tiles, output_path=str(output_dir.absolute()),
                                                predict_only=False, TTA=config['tta'], num_augs=config['num_augmentations'],
                                                dataset_csv=dataset_path.absolute())
         
@@ -289,13 +369,16 @@ def main(config, config_file):
             sys.exit(6)
         assert os.path.exists(config['auxilliary_files_folder']), f"Could not find auxilliary_files_folder {config['auxilliary_files_folder']}"
         
+        if 'epsg_code' not in config:
+            warnings.warn("'epsg_code' not found in config. Falling back to EPSG:32634 (WGS 84 / UTM Zone 34N). Shapefiles may have incorrect CRS.", UserWarning)
         generate_shapefiles(input_image_path=config['raw_satellite_image_path'],
                             auxilliary_files_folder=config['auxilliary_files_folder'],
                             output_folder=output_dir,
                             shapefile_name=config['shapefile_name'],
                             reconstructed_map_file=output_map_filename,
                             crop=config['crop'],
-                            produce_png_overlay=False
+                            produce_png_overlay=False,
+                            epsg_code=config.get('epsg_code', 32634)
                             )
 
     if not config['use_masked']:

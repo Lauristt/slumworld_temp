@@ -12,6 +12,7 @@ USAGE:
 import sys
 import shutil
 import os
+import warnings
 import shutil
 import pdb
 from torchvision.transforms.functional import convert_image_dtype
@@ -212,13 +213,16 @@ def main(config, config_file):
             sys.exit(6)
         assert os.path.exists(config['auxilliary_files_folder']), f"Could not find auxilliary_files_folder {config['auxilliary_files_folder']}"
         
+        if 'epsg_code' not in config:
+            warnings.warn("'epsg_code' not found in config. Falling back to EPSG:32634 (WGS 84 / UTM Zone 34N). Shapefiles may have incorrect CRS.", UserWarning)
         generate_shapefiles(input_image_path=config['raw_satellite_image_path'],
                             auxilliary_files_folder=config['auxilliary_files_folder'],
                             output_folder=output_path_,
                             shapefile_name=config['shapefile_name'],
                             reconstructed_map_file=output_map_filename,
                             crop=config['crop'],
-                            produce_png_overlay=False
+                            produce_png_overlay=False,
+                            epsg_code=config.get('epsg_code', 32634)
                             )
 
     if not config['use_masked']:
